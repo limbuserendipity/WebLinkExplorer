@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Website Screenshot</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body, html {
+            height: 100%;
+            margin: 0;
+            font-family: 'Orbitron', sans-serif;
+            background-color: #0d0d0d;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #00ffcc;
+        }
+        .container {
+            text-align: center;
+        }
+        input[type="text"] {
+            padding: 10px;
+            font-size: 16px;
+            background: none;
+            border: 2px solid #00ffcc;
+            border-radius: 5px;
+            color: #00ffcc;
+            outline: none;
+            margin-bottom: 10px;
+            width: 300px;
+        }
+        button {
+            padding: 10px;
+            font-size: 16px;
+            background: none;
+            border: 2px solid #00ffcc;
+            border-radius: 5px;
+            color: #00ffcc;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background: #00ffcc;
+            color: #0d0d0d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Enter URL to Capture Screenshot</h1>
+        <form action="/submit" method="post">
+            <input type="text" name="user_input" placeholder="https://example.com" required>
+            <button type="submit">Capture</button>
+        </form>
+    </div>
+</body>
+</html>

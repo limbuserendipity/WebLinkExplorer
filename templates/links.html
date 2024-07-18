@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Links Page</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body, html {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: 'Orbitron', sans-serif;
+            background-color: #0d0d0d;
+            color: #00ffcc;
+        }
+        .container {
+            text-align: center;
+            width: 90%;
+            margin: 0 auto;
+        }
+        img {
+            max-width: 100%;
+            border: 2px solid #00ffcc;
+            border-radius: 5px;
+        }
+        a {
+            color: #00ffcc;
+            text-decoration: none;
+            font-size: 14px;
+            word-wrap: break-word;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        table {
+            margin-top: 20px;
+            border-collapse: collapse;
+            width: 100%;
+            table-layout: fixed;
+        }
+        table, th, td {
+            border: 2px solid #00ffcc;
+        }
+        th, td {
+            padding: 10px;
+            text-align: center;
+            vertical-align: top;
+            width: 33%;
+            word-wrap: break-word;
+        }
+        td {
+            height: 250px;
+        }
+        img.link-screenshot {
+            max-width: 380px;
+            max-height: 260px;
+            display: block;
+            margin: 0 auto;
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+        }
+        img.link-screenshot:hover {
+            transform: scale(1.1);
+            box-shadow: 0 0 10px #00ffcc;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-radius: 50%;
+            border-top: 4px solid #00ffcc;
+            width: 24px;
+            height: 24px;
+            animation: spin 2s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const links = JSON.parse(document.getElementById('links-data').textContent);
+            links.forEach((link, index) => {
+                const imgContainer = document.getElementById(`screenshot-container-${index}`);
+                const loader = document.createElement('div');
+                loader.classList.add('loader');
+                imgContainer.appendChild(loader);
+
+                fetch('/capture_screenshot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ link })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    const img = document.createElement('img');
+                    img.src = data.screenshot;
+                    img.classList.add('link-screenshot');
+                    img.setAttribute('data-link', link);
+
+                    img.addEventListener('click', function() {
+                        const link = this.getAttribute('data-link');
+                        fetch('/parse_again', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ link })
+                        })
+                        .then(response => response.json())
+                        .then(data => {
+                            window.location.href = `/submit?user_input=${encodeURIComponent(data.url)}`;
+                        })
+                        .catch(error => console.error('Error:', error));
+                    });
+
+                    imgContainer.removeChild(loader);
+                    imgContainer.appendChild(img);
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    imgContainer.removeChild(loader);
+                });
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Website Screenshot</h1>
+        <img src="{{ screenshot_url }}" alt="Website Screenshot">
+        <h2>Entered URL</h2>
+        <a href="{{ url }}" target="_blank">{{ url }}</a>
+        <h2>Links found on the page</h2>
+        <table>
+            <tr>
+            {% for link in links %}
+                <td>
+                    <div id="screenshot-container-{{ loop.index0 }}"></div>
+                    <br>
+                    <a href="{{ link }}" target="_blank">{{ link }}</a>
+                </td>
+                {% if loop.index0 % 3 == 2 %}
+            </tr><tr>
+                {% endif %}
+            {% endfor %}
+            </tr>
+        </table>
+    </div>
+    <div id="links-data" style="display:none;">{{ links|tojson }}</div>
+</body>
+</html>
