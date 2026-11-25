@@ -200,6 +200,46 @@ def check_menu(r):
     return ok, ("меню -> трон, 2 игрока" if ok else "меню не запустило игру")
 
 
+@check("cursor")
+def check_cursor(r):
+    """Курсор меню ходит по всему экрану (относительное смещение, а не позиция носа)."""
+    mock, port = r.start_mock(["--duration", "30"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=cursor"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"SELFTEST MENU CURSOR: размах X=(\d+) px, Y=(\d+) px", r.text())
+    ok = "SELFTEST MENU CURSOR PASS" in r.text()
+    return ok, ("размах курсора X=%s px, Y=%s px" % (m.group(1), m.group(2))
+                if ok and m else "курсор почти не двигается")
+
+
+@check("troninput")
+def check_troninput(r):
+    """«Трон»: ввод людей работает — нейтраль калибруется, мотоцикл поворачивает."""
+    mock, port = r.start_mock(["--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--game=tron", "--selftest=log"])
+        time.sleep(8)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    if "TRON CALIB slot=" not in text:
+        return False, "нейтраль не калибруется"
+    axes = []
+    wants = set()
+    for m in re.finditer(r"TRON INPUT slot=\d ax=([-+][\d.]+) ay=([-+][\d.]+).*want=\((-?\d),(-?\d)\)",
+                         text):
+        axes.append(max(abs(float(m.group(1))), abs(float(m.group(2)))))
+        wants.add((m.group(3), m.group(4)))
+    if not axes or max(axes) < 0.4:
+        return False, "оси не отклоняются (max %.2f)" % (max(axes) if axes else 0.0)
+    if len(wants) < 2:
+        return False, "мотоцикл не поворачивает (want=%s)" % sorted(wants)
+    return True, "нейтраль снята, оси до %.2f, повороты работают" % max(axes)
+
+
 @check("tron")
 def check_tron(r):
     """«Трон»: раунд с ботами заканчивается, победитель определяется."""

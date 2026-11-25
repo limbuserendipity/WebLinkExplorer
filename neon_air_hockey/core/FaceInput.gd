@@ -9,7 +9,7 @@ extends RefCounted
 
 const MODES := ["face", "tilt", "lean"]
 
-const RANGE_FACE_REL := 0.25      # полный ход лица = 25% высоты рамки человека
+const RANGE_FACE_REL := 0.20      # полный ход лица = 20% высоты рамки человека
 const RANGE_FACE_MIN_PX := 18.0   # минимальный делитель, px (как в документе v3)
 const RANGE_TILT_X := 0.20        # поворот головы (в долях межглазного расстояния)
 const RANGE_TILT_Y := 0.22        # наклон головы набок, радианы

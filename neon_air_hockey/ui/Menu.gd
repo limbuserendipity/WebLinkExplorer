@@ -45,7 +45,13 @@ var forced := ""
 var state_t := 0.0
 var frame_px := Vector2(1920.0, 1080.0)
 var cursor_pos := {}             # track_id -> Vector2 на экране
+var inputs := {}                 # track_id -> FaceInput (нейтраль и оси)
+var cursor_sens := Vector2(900.0, 700.0)   # размах курсора при полном отклонении
+var cur_min := Vector2(1e9, 1e9)
+var cur_max := Vector2(-1e9, -1e9)
 var msg := ""
+var input_mode := "face"
+var debug_ui := false
 var msg_t := 0.0
 
 
@@ -58,6 +64,12 @@ func _ready() -> void:
 			forced = arg.trim_prefix("--game=")
 		elif arg == "--no-audio":
 			no_audio = true
+		elif arg.begins_with("--gain="):
+			cursor_sens = Vector2(900.0, 700.0) * clampf(float(arg.trim_prefix("--gain=")), 0.3, 3.0)
+		elif arg.begins_with("--control="):
+			input_mode = arg.trim_prefix("--control=").to_lower()
+		elif arg == "--debug":
+			debug_ui = true
 		elif arg.begins_with("--port="):
 			demo = false
 	var has_port := false
@@ -70,7 +82,7 @@ func _ready() -> void:
 	# Существующие автотесты запускают игру сразу: меню их не задерживает.
 	if forced != "":
 		_load_game(forced)
-	elif selftest != "" and selftest != "menu":
+	elif selftest != "" and selftest != "menu" and selftest != "cursor":
 		_load_game("tron" if selftest == "tron" else "air")
 
 
@@ -104,26 +116,61 @@ func _collect_players() -> void:
 	frame_px = Vector2(bridge.frame_size)
 	if frame_px.x < 1.0 or frame_px.y < 1.0:
 		frame_px = Vector2(1920.0, 1080.0)
+	var aspect := frame_px.x / frame_px.y
 	var list: Array = bridge.players()
 	list.sort_custom(func(a, b): return a.camera_rect_norm.position.x < b.camera_rect_norm.position.x)
 	var i := 0
 	for p in list:
 		if str(p.state) != "confirmed":
 			continue
-		var nose := Inp.nose_screen(p, frame_px)
+		var id: int = p.track_id
+		var fi = inputs.get(id, null)
+		if fi == null:
+			fi = Inp.new()
+			inputs[id] = fi
+		fi.mode = input_mode
+		fi.update(p, get_process_delta_time(), aspect, frame_px)
+		if not fi.have_neutral:
+			fi.accumulate()
+			if fi.samples >= 12:
+				fi.finish_calibration()
 		var col: Color = p.color if p.color is Color else Neo.player_color(i)
-		players.append({"slot": p.slot, "track_id": p.track_id, "color": col,
-			"nose": nose, "name": "игрок %d" % (i + 1)})
-		cursor_pos[p.track_id] = Vector2(nose.x * 1920.0, nose.y * 1080.0)
+		players.append({"slot": p.slot, "track_id": id, "color": col,
+			"name": "игрок %d" % (i + 1), "calibrated": fi.have_neutral})
+		cursor_pos[id] = Vector2.ZERO       # посчитаем после, когда известно число игроков
 		i += 1
 		if i >= 4:
 			break
-	# забываем тех, кто ушёл
+	# Курсор — НЕ абсолютная позиция носа: лицо в кадре двигается мало. Берём
+	# отклонение от нейтрали (ax, ay) и разгоняем его до размаха экрана.
+	var n := players.size()
+	for k in n:
+		var p: Dictionary = players[k]
+		var fi = inputs.get(p.track_id, null)
+		if fi == null:
+			continue
+		var off := Vector2(fi.ax, fi.ay) * cursor_sens
+		cursor_pos[p.track_id] = _chip_pos(k, n) + off
+		cur_min = Vector2(minf(cur_min.x, off.x), minf(cur_min.y, off.y))
+		cur_max = Vector2(maxf(cur_max.x, off.x), maxf(cur_max.y, off.y))
+		if debug_ui:
+			printerr("MENU INPUT slot=%d ax=%+.2f ay=%+.2f neutral=%s cursor=(%.0f, %.0f)" % [
+				p.slot, fi.ax, fi.ay, fi.have_neutral, cursor_pos[p.track_id].x,
+				cursor_pos[p.track_id].y])
 	for key in votes.keys():
 		if not _has_track(key):
 			votes.erase(key)
 			dwell.erase(key)
 			hover.erase(key)
+	for key in inputs.keys():
+		if not _has_track(key):
+			inputs.erase(key)
+
+
+func _chip_pos(i: int, n: int) -> Vector2:
+	# Курсор начинается у «фишки» игрока внизу — оттуда удобно тянуться к плиткам.
+	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
+	return Vector2(x0 + 260.0 * i, 870.0)
 
 
 func _has_track(id: int) -> bool:
@@ -207,7 +254,9 @@ func _process(dt: float) -> void:
 	_collect_players()
 	if selftest == "menu":
 		_selftest_vote(dt)
-	if players.size() > 0:
+	if selftest == "cursor":
+		_selftest_cursor()
+	elif players.size() > 0:
 		_tick_voting(dt)
 	# если проголосовали не все, но кто-то ушёл из кадра — запускаем лидера по таймауту
 	if players.size() > 0 and votes.size() < players.size() and _leading() >= 0 \
@@ -231,6 +280,22 @@ func _process(dt: float) -> void:
 				_load_game(start_target)
 				return
 	queue_redraw()
+
+
+func _selftest_cursor() -> void:
+	# Проверка «курсор ходит по всему экрану», а не на пару сантиметров.
+	if state_t < 1.5 or players.is_empty():
+		return
+	var spread := cur_max - cur_min
+	if state_t > 5.5:
+		var ok := spread.x > 600.0 and spread.y > 200.0
+		printerr("SELFTEST MENU CURSOR: размах X=%.0f px, Y=%.0f px" % [spread.x, spread.y])
+		if ok:
+			printerr("SELFTEST MENU CURSOR PASS")
+			get_tree().quit(0)
+		else:
+			printerr("SELFTEST MENU CURSOR FAIL: курсор почти не двигается")
+			get_tree().quit(1)
 
 
 func _selftest_vote(dt: float) -> void:
@@ -342,11 +407,9 @@ func _color_of(track_id: int) -> Color:
 
 
 func _draw_players() -> void:
-	var n := players.size()
-	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
-	for i in n:
+	for i in players.size():
 		var p: Dictionary = players[i]
-		var pos := Vector2(x0 + 260.0 * i, 870.0)
+		var pos := _chip_pos(i, players.size())
 		draw_circle(pos - Vector2(70, 0), 14.0, p.color)
 		Neo.text(self, p.name, pos, 26, Neo.TEXT)
 		var voted := "не голосовал"

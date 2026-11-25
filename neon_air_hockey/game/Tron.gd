@@ -122,6 +122,7 @@ func _process(dt: float) -> void:
 		St.WAIT:
 			_tick_wait(dt)
 		St.READY:
+			_collect_inputs(dt)
 			if state_t >= 1.8:
 				_set_state(St.RUN)
 		St.RUN:
@@ -250,7 +251,40 @@ func _place_bike(b: Bike, i: int, n: int) -> void:
 	occ[b.cell] = b.id
 
 
+func _collect_inputs(dt: float) -> void:
+	# Ввод людей читаем КАЖДЫЙ кадр: в отсчёте копим нейтраль, в игре — рулим.
+	if demo or bridge == null:
+		return
+	var players: Array = bridge.players()
+	for b in bikes:
+		if not b.human:
+			continue
+		var p = null
+		for cand in players:
+			if cand.slot == b.track_slot and cand.track_id == b.track_id \
+					and str(cand.state) == "confirmed":
+				p = cand
+				break
+		if p == null:
+			continue
+		b.inp.mode = input_mode
+		b.inp.gain = gain
+		b.inp.flip_x = flip_x
+		b.inp.flip_y = flip_y
+		b.inp.update(p, dt, _aspect(), _frame_px())
+		b.nose = Inp.nose_screen(p, _frame_px())
+		if not b.inp.have_neutral:
+			b.inp.accumulate()
+			if b.inp.samples >= 12:
+				b.inp.finish_calibration()
+				printerr("TRON CALIB slot=%d nx=%.2f ny=%.2f" % [b.track_slot, b.inp.nx, b.inp.ny])
+		if selftest == "log" and Engine.get_process_frames() % 20 == 0:
+			printerr("TRON INPUT slot=%d ax=%+.2f ay=%+.2f neutral=%s want=(%d,%d)" % [
+				b.track_slot, b.inp.ax, b.inp.ay, b.inp.have_neutral, b.want.x, b.want.y])
+
+
 func _tick_run(dt: float) -> void:
+	_collect_inputs(dt)
 	_update_frozen()
 	if frozen:
 		if bridge != null:
@@ -312,37 +346,18 @@ func _read_humans(_dt: float) -> void:
 			if k != Vector2i.ZERO:
 				b0.want = k
 		return
-	if bridge == null:
-		return
-	var players: Array = bridge.players()
 	for b in bikes:
-		if not b.human:
+		if not b.human or not b.inp.have_neutral:
 			continue
-		var p = null
-		for cand in players:
-			if cand.slot == b.track_slot and cand.track_id == b.track_id:
-				p = cand
-				break
-		if p == null:
-			b.nose = Vector2(0.5, 0.5)
+		var ax: float = b.inp.ax
+		var ay: float = b.inp.ay
+		if maxf(absf(ax), absf(ay)) < TURN_DEADZONE:
 			continue
-		b.inp.mode = input_mode
-		b.inp.gain = gain
-		b.inp.flip_x = flip_x
-		b.inp.flip_y = flip_y
-		b.inp.update(p, TICK, _aspect(), _frame_px())
-		b.nose = Inp.nose_screen(p, _frame_px())
-		if b.inp.have_neutral:
-			var k := Vector2i.ZERO
-			var ax: float = b.inp.ax
-			var ay: float = b.inp.ay
-			if maxf(absf(ax), absf(ay)) >= TURN_DEADZONE:
-				if absf(ax) >= absf(ay):
-					k = Vector2i.RIGHT if ax > 0.0 else Vector2i.LEFT
-				else:
-					k = Vector2i.DOWN if ay > 0.0 else Vector2i.UP
-			if k != Vector2i.ZERO:
-				b.want = k
+		# гистерезис: на границе осей не переключаем направление туда-сюда
+		if absf(ax) >= absf(ay) * 1.15:
+			b.want = Vector2i.RIGHT if ax > 0.0 else Vector2i.LEFT
+		elif absf(ay) >= absf(ax) * 1.15:
+			b.want = Vector2i.DOWN if ay > 0.0 else Vector2i.UP
 
 
 func _step_world() -> void:
