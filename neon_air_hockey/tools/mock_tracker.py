@@ -30,6 +30,8 @@ start / hold / end. body_height слегка меняется, имитируя 
   --video       слать JPEG-кадры ~10 к/с (нужен Pillow);
   --hold S      длительность удержания жеста (по умолчанию 0.6 с);
   --jump-every S период прыжков одного игрока (по умолчанию 3 с);
+  --replay FILE проиграть трассу, записанную игрой (--record=FILE), вместо
+                синтетических игроков; --speed N ускоряет/замедляет её;
   --duration S  завершиться через S секунд (0 = бесконечно);
   --fps N       частота пакетов (по умолчанию 30).
 
@@ -59,6 +61,16 @@ def make_player(args, slot, track_id, cx, t, n, color):
     if args.legacy:
         cx += sway          # без позы двигаем весь силуэт: рамка и есть вход
     head_x = cx + sway
+    # лицо: наклон головы набок (roll) и поворот (yaw), чтобы работал режим tilt
+    roll = 0.18 * math.sin(2 * math.pi * t / (3.3 + 0.4 * slot) + slot)
+    yaw = 0.35 * math.sin(2 * math.pi * t / (4.6 + 0.5 * slot) + slot * 2.1)
+    eye_d = 0.035
+    axis = (math.cos(roll), math.sin(roll))
+    perp = (-math.sin(roll), math.cos(roll))
+    nose_x = head_x + axis[0] * yaw * eye_d
+    nose_y = head_y + axis[1] * yaw * eye_d + perp[1] * eye_d * 0.22
+    eye_l = [round(head_x - axis[0] * eye_d / 2, 4), round(head_y - axis[1] * eye_d / 2, 4), 0.9]
+    eye_r = [round(head_x + axis[0] * eye_d / 2, 4), round(head_y + axis[1] * eye_d / 2, 4), 0.9]
     feet = [[cx - 0.05, FEET_Y], [cx + 0.05, FEET_Y]]
     top = head_y - 0.04
     height = FEET_Y - top
@@ -69,7 +81,7 @@ def make_player(args, slot, track_id, cx, t, n, color):
     }
     if args.legacy:
         return row
-    head = {"p": [round(head_x, 4), round(head_y, 4)], "conf": 0.96}
+    head = {"p": [round(nose_x, 4), round(nose_y, 4)], "conf": 0.96}
     if args.lose_head is not None and args.lose_head <= t < args.lose_head + args.gone_for:
         head = {}
         body = 0.0
@@ -81,11 +93,11 @@ def make_player(args, slot, track_id, cx, t, n, color):
               [round(head_x + 0.11, 4), round(head_y + 0.16, 4), 0.8]]
     ankles = [[feet[0][0], feet[0][1], 0.91], [feet[1][0], feet[1][1], 0.91]]
     keypoints = [
-        [round(head_x, 4), round(head_y, 4), 0.97],          # нос
-        [round(head_x - 0.015, 4), round(head_y - 0.01, 4), 0.9],   # глаз Л
-        [round(head_x + 0.015, 4), round(head_y - 0.01, 4), 0.9],   # глаз П
-        [round(head_x - 0.035, 4), round(head_y, 4), 0.7],   # ухо Л
-        [round(head_x + 0.035, 4), round(head_y, 4), 0.7],   # ухо П
+        [round(nose_x, 4), round(nose_y, 4), 0.97],                  # нос
+        eye_l,                                                      # глаз Л
+        eye_r,                                                      # глаз П
+        [round(head_x - axis[0] * 0.045, 4), round(head_y - axis[1] * 0.045, 4), 0.7],
+        [round(head_x + axis[0] * 0.045, 4), round(head_y + axis[1] * 0.045, 4), 0.7],
         shoulders[0], shoulders[1],
         [round(head_x - 0.10, 4), round(head_y + 0.20, 4), 0.8],    # локоть Л
         [round(head_x + 0.10, 4), round(head_y + 0.20, 4), 0.8],    # локоть П
@@ -125,6 +137,69 @@ def render_jpeg(players, pil):
     return buf.getvalue()
 
 
+def replay_trace(connection, args):
+    """Проигрывает трассу записи: те же данные, те же интервалы."""
+    records = []
+    with open(args.replay, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    print(f"mock v2: реплей {len(records)} кадров из {args.replay}", flush=True)
+    n = 0
+    event_id = 0
+    t_prev = 0.0
+    try:
+        for rec in records:
+            wait = (float(rec.get("t", 0.0)) - t_prev) / max(args.speed, 0.05)
+            if wait > 0:
+                time.sleep(min(wait, 0.25))
+            t_prev = float(rec.get("t", 0.0))
+            rows = []
+            for row in rec.get("players", []):
+                head = row.get("head") or []
+                rows.append({
+                    "slot": int(row["slot"]), "track_id": int(row["track_id"]),
+                    "age_ticks": 0, "color": row.get("color", [0.5, 0.5, 1.0]),
+                    "rect": row.get("rect", [0.0, 0.0, 0.0, 0.0]),
+                    "feet": row.get("feet", []),
+                    "feet_confidence": float(row.get("feet_confidence", 0.0)),
+                    "mask_slot": 0, "sample_id": n,
+                    "head": {"p": [head[0], head[1]], "conf": head[2]} if len(head) == 3 else {},
+                    "body_height": float(row.get("body_height", 0.0)),
+                    "keypoints": row.get("keypoints", []),
+                    "state": row.get("state", "confirmed"), "lost_since": -1.0,
+                    "reacquired": False, "reacquired_sample_id": -1,
+                })
+            gestures, phases = [], []
+            for ev in rec.get("events", []):
+                event_id += 1
+                item = {"id": event_id, "slot": int(ev.get("slot", 0)),
+                        "track_id": int(ev.get("track_id", -1)),
+                        "action": str(ev.get("action", "jump")),
+                        "phase": str(ev.get("phase", "start")),
+                        "confidence": float(ev.get("confidence", 0.0)),
+                        "at": round(t_prev, 3), "duration": 0.0}
+                if item["phase"] == "start":
+                    gestures.append(item)
+                else:
+                    phases.append(item)
+            packet = {"frame_id": n, "tracking_age": 0.02, "frame_age": None,
+                      "capabilities": ["pose", "track_state", "gesture_phases"],
+                      "frame_size": [FRAME_W, FRAME_H],
+                      "capture_time": round(t_prev, 3), "tracking_time": round(t_prev + 0.02, 3),
+                      "players": rows, "tentative_players": [],
+                      "gestures": gestures, "gesture_phases": phases}
+            body = json.dumps(packet).encode("utf-8")
+            connection.sendall(struct.pack("!II", len(body), 0) + body)
+            n += 1
+            if args.duration and t_prev >= args.duration:
+                break
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        print("mock v2: игра закрыла соединение", flush=True)
+    print("mock v2: реплей завершён, кадров:", n, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -146,6 +221,8 @@ def main():
     ap.add_argument("--video", action="store_true")
     ap.add_argument("--hold", type=float, default=0.6)
     ap.add_argument("--jump-every", type=float, default=3.0)
+    ap.add_argument("--replay", default="")
+    ap.add_argument("--speed", type=float, default=1.0)
     args = ap.parse_args()
 
     pil = None
@@ -165,6 +242,10 @@ def main():
     print(f"mock v2: жду игру на 127.0.0.1:{port} (fps={args.fps:g})", flush=True)
     connection, _ = server.accept()
     print("mock v2: игра подключилась", flush=True)
+    if args.replay:
+        replay_trace(connection, args)
+        server.close()
+        return
 
     n = 0
     event_id = 0
