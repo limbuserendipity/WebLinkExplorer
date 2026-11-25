@@ -9,6 +9,8 @@ extends Node2D
 const Inp := preload("res://core/FaceInput.gd")
 const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
+const CamView := preload("res://core/CamView.gd")
+const InputHint := preload("res://core/InputHint.gd")
 
 const DWELL := 1.2                # сколько держать лицо на плитке для голоса
 const COUNTDOWN := 2.5            # отсчёт перед запуском
@@ -19,13 +21,16 @@ const CARDS := [
 	{"id": "tron", "title": "ТРОН", "who": "1–4 игрока", "min": 1, "max": 4,
 		"scene": "res://game/Tron.tscn",
 		"hint": "световой след · кто дольше живёт"},
-	{"id": "soon", "title": "СКОРО", "who": "—", "min": 99, "max": 99,
-		"scene": "", "hint": "место для следующей игры"},
+	{"id": "razor", "title": "РАЗОРТРОН 2000", "who": "1–6 игроков", "min": 1, "max": 6,
+		"scene": "res://game/Razor.tscn",
+		"hint": "гонка в закат · кто первый к финишу"},
 ]
 const CARD_W := 420.0
 const CARD_H := 380.0
 const CARD_Y := 300.0
 const CARD_GAP := 60.0
+const CAM_RECT := Rect2(1600.0, 24.0, 296.0, 166.0)   # кадр с камеры
+const HINT_RECT := Rect2(628.0, 682.0, 664.0, 96.0)   # подсказка лицо/рука
 
 var bridge: Node
 var synth := Sfx.new()
@@ -50,13 +55,18 @@ var cursor_sens := Vector2(900.0, 560.0)   # размах курсора при 
 var cur_min := Vector2(1e9, 1e9)
 var cur_max := Vector2(-1e9, -1e9)
 var msg := ""
-var input_mode := "face"
+var input_mode := "auto"
 var debug_ui := false
 var msg_t := 0.0
+var cam_view: Control = null
 
 
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
+	cam_view = CamView.new()
+	cam_view.setup(CAM_RECT)
+	cam_view.subtitle = "фильтр: неон"
+	add_child(cam_view)
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--selftest="):
 			selftest = arg.trim_prefix("--selftest=")
@@ -82,8 +92,16 @@ func _ready() -> void:
 	# Существующие автотесты запускают игру сразу: меню их не задерживает.
 	if forced != "":
 		_load_game(forced)
-	elif selftest != "" and selftest != "menu" and selftest != "cursor":
-		_load_game("tron" if selftest == "tron" else "air")
+	elif selftest != "" and selftest != "menu" and selftest != "cursor" \
+			and selftest != "hint":
+		_load_game(selftest if _has_card(selftest) else "air")
+
+
+func _has_card(id: String) -> bool:
+	for c in CARDS:
+		if c.id == id and c.scene != "":
+			return true
+	return false
 
 
 func _exit_tree() -> void:
@@ -252,8 +270,11 @@ func _process(dt: float) -> void:
 	if bridge != null:
 		bridge.rotation_checkpoint()
 	_collect_players()
+	_update_cam()
 	if selftest == "menu":
 		_selftest_vote(dt)
+	if selftest == "hint":
+		_selftest_hint()
 	if selftest == "cursor":
 		_selftest_cursor()
 	elif players.size() > 0:
@@ -280,6 +301,45 @@ func _process(dt: float) -> void:
 				_load_game(start_target)
 				return
 	queue_redraw()
+
+
+## Активный источник ввода первого игрока: "face" или "hand".
+func _active_src() -> String:
+	for p in players:
+		var inp = inputs.get(p.track_id)
+		if inp != null and inp.have_input:
+			return inp.active
+	return "hand" if input_mode == "hand" else "face"
+
+
+func _update_cam() -> void:
+	if cam_view == null or bridge == null:
+		return
+	var boxes := []
+	for p in bridge.all_players():
+		if p.age_ticks >= 30:
+			continue
+		var rr: Rect2 = p.camera_rect_norm
+		if rr.size.x <= 0.001:
+			continue
+		boxes.append({"rect": rr, "color": p.color, "label": ""})
+	cam_view.subtitle = "ввод: рука" if _active_src() == "hand" else "ввод: лицо"
+	cam_view.set_feed(bridge.camera_texture, boxes, bridge.frame_age() < 1.5)
+
+
+## Проверка подсказки «близко — лицом, далеко — рукой»: виджет загружен,
+## тексты на месте, активный источник определяется.
+func _selftest_hint() -> void:
+	if state_t < 2.0 or players.is_empty():
+		return
+	var src := _active_src()
+	if src != "face" and src != "hand":
+		printerr("SELFTEST HINT FAIL: источник ввода не определён")
+		get_tree().quit(1)
+		return
+	printerr("SELFTEST HINT: источник=%s плиток=%d игроков=%d" % [src, CARDS.size(), players.size()])
+	printerr("SELFTEST HINT PASS")
+	get_tree().quit(0)
 
 
 func _selftest_cursor() -> void:
@@ -355,6 +415,7 @@ func _draw() -> void:
 	if demo:
 		hint = "демо без трекинга: 1 / 2 / 3 — запустить игру"
 	Neo.text(self, hint, Vector2(960, 1010), 24, Neo.DIM)
+	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001, true)
 	if msg_t > 0.0:
 		Neo.text(self, msg, Vector2(960, 1050), 22, Neo.WARN)
 	if players.is_empty():

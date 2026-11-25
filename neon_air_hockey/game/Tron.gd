@@ -6,8 +6,12 @@ extends Node2D
 const Inp := preload("res://core/FaceInput.gd")
 const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
+const CamView := preload("res://core/CamView.gd")
+const InputHint := preload("res://core/InputHint.gd")
 
-const ARENA := Rect2(360.0, 260.0, 1200.0, 560.0)
+const ARENA := Rect2(40.0, 230.0, 1440.0, 640.0)   # поле занимает почти весь экран
+const CAM_RECT := Rect2(1500.0, 230.0, 400.0, 225.0)  # кадр с камеры
+const HINT_RECT := Rect2(1500.0, 472.0, 400.0, 236.0) # подсказка лицо/рука
 const CELL := 20.0
 const TICK := 0.075              # шаг мотоцикла, с
 const WIN_ROUNDS := 3
@@ -52,8 +56,9 @@ var solo := false
 var arena_cells := Vector2i.ZERO
 
 var synth := Sfx.new()
+var cam_view = null
 var selftest := ""
-var input_mode := "face"
+var input_mode := "auto"
 var gain := 1.0
 var flip_x := 1.0
 var flip_y := 1.0
@@ -69,6 +74,10 @@ var frame_px := Vector2(1920.0, 1080.0)
 
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
+	cam_view = CamView.new()
+	cam_view.setup(CAM_RECT)
+	cam_view.subtitle = "фильтр: неон"
+	add_child(cam_view)
 	var has_port := false
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--port="):
@@ -89,10 +98,27 @@ func _ready() -> void:
 			no_audio = true
 	demo = not has_port
 	if not Inp.MODES.has(input_mode):
-		input_mode = "face"
+		input_mode = "auto"
 	if not no_audio:
 		synth.setup(self)
 	arena_cells = Vector2i(int(ARENA.size.x / CELL), int(ARENA.size.y / CELL))
+	# Раскладка: поле занимает почти весь экран, правый столбец — камера и подсказка.
+	var frac := ARENA.get_area() / (1920.0 * 1080.0)
+	var side := (CAM_RECT.get_area() + HINT_RECT.get_area()) / (1920.0 * 1080.0)
+	var clean: bool = not ARENA.intersects(CAM_RECT) and not ARENA.intersects(HINT_RECT) \
+		and CAM_RECT.end.x <= 1920.0 and HINT_RECT.end.y <= 1080.0
+	var shader_ok: bool = cam_view != null and cam_view.has_filter()
+	printerr("TRON LAYOUT arena=%.0fx%.0f доля=%.2f столбец=%.2f cam=%s hint=%s фильтр=%s" % [
+		ARENA.size.x, ARENA.size.y, frac, side, CAM_RECT, HINT_RECT,
+		"да" if shader_ok else "нет"])
+	if selftest == "layout":
+		if frac >= 0.40 and side >= 0.07 and clean and shader_ok:
+			printerr("SELFTEST LAYOUT PASS")
+			get_tree().quit(0)
+		else:
+			printerr("SELFTEST LAYOUT FAIL: доля=%.2f столбец=%.2f чисто=%s фильтр=%s" % [
+				frac, side, clean, shader_ok])
+			get_tree().quit(1)
 	printerr("TRON START players=", _human_count_hint(), " mode=", input_mode)
 	_set_state(St.WAIT)
 	state_t = 100.0 if selftest == "tron" else 0.0   # в автотесте не ждём игроков
@@ -118,6 +144,7 @@ func _process(dt: float) -> void:
 	synth.pump()
 	shake = maxf(0.0, shake - dt * 1.6)
 	_update_sparks(dt)
+	_update_cam()
 	match state:
 		St.WAIT:
 			_tick_wait(dt)
@@ -582,25 +609,29 @@ func _draw_sparks() -> void:
 
 
 func _draw_hud() -> void:
-	Neo.text(self, "ТРОН", Vector2(960, 120), 64, Neo.TEXT)
-	Neo.text(self, "раунд %d · до %d побед" % [round_no, WIN_ROUNDS], Vector2(960, 165), 24, Neo.DIM)
+	Neo.text(self, "ТРОН", Vector2(740, 96), 64, Neo.TEXT)
+	Neo.text(self, "раунд %d · до %d побед" % [round_no, WIN_ROUNDS], Vector2(740, 142), 24, Neo.DIM)
 	var n := bikes.size()
 	var total_w := n * 240.0
-	var x0 := 960.0 - total_w * 0.5
+	var x0 := 740.0 - total_w * 0.5
 	for i in n:
 		var b: Bike = bikes[i]
-		var p := Vector2(x0 + 240.0 * i + 120.0, 215.0)
+		var p := Vector2(x0 + 240.0 * i + 120.0, 190.0)
 		draw_circle(p - Vector2(58, 0), 12.0, b.color if b.alive else Neo.with_alpha(b.color, 0.35))
 		Neo.text(self, "%s  %d" % [b.title, b.score], p, 28, Neo.TEXT)
 	var hint := "отклоните лицо в сторону — мотоцикл повернёт · в след нельзя"
 	if demo:
 		hint = "стрелки — поворот · в след нельзя"
-	Neo.text(self, hint, Vector2(960, 1000), 24, Neo.DIM)
+	Neo.text(self, hint, Vector2(790, 1000), 24, Neo.DIM)
+	Neo.text(self, "1..5 — режим ввода · ESC — меню", Vector2(220, 1000), 22, Neo.DIM)
+	Neo.text(self, _status_line(), Vector2(1290, 1000), 22, Neo.DIM)
+	# визуальная подсказка: близко — лицом, далеко — рукой
+	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001)
 	if frozen and state == St.RUN:
 		Neo.text(self, "ПАУЗА: ждём игроков в кадре", Vector2(960, 620), 40, Neo.WARN)
 	if solo:
 		Neo.text(self, "продержался %.1f с · лучший %.1f с · попытка %d/3" % [
-			survival, best_time, round_no], Vector2(960, 955), 22, Neo.DIM)
+			survival, best_time, round_no], Vector2(790, 950), 22, Neo.DIM)
 	if debug_ui:
 		var y := 900.0
 		for b in bikes:
@@ -636,6 +667,40 @@ func _draw_overlay() -> void:
 			else:
 				Neo.text(self, "победил %s" % lead, Vector2(960, 540), 56, Neo.OK)
 			Neo.text(self, "возвращаемся в меню…", Vector2(960, 610), 26, Neo.DIM)
+
+
+## Активный источник ввода первого живого игрока: "face" или "hand".
+func _active_src() -> String:
+	for b in bikes:
+		if b.human and b.inp.have_input:
+			return b.inp.active
+	return "hand" if input_mode == "hand" else "face"
+
+
+func _status_line() -> String:
+	if bridge == null:
+		return "нет трекера"
+	var age: float = bridge.tracking_age()
+	if is_inf(age):
+		return "нет данных"
+	var src := "рука" if _active_src() == "hand" else "лицо"
+	return "ввод: %s · данные %.0f мс · %s" % [src, age * 1000.0, input_mode]
+
+
+## Кадр с вебкамеры: текстура, рамки игроков, подпись.
+func _update_cam() -> void:
+	if cam_view == null or bridge == null:
+		return
+	var boxes := []
+	for p in bridge.all_players():
+		if p.age_ticks >= 30:
+			continue
+		var rr: Rect2 = p.camera_rect_norm
+		if rr.size.x <= 0.001:
+			continue
+		boxes.append({"rect": rr, "color": p.color, "label": ""})
+	cam_view.subtitle = "ввод: рука" if _active_src() == "hand" else "ввод: лицо"
+	cam_view.set_feed(bridge.camera_texture, boxes, bridge.frame_age() < 1.5)
 
 
 # ---------------------------------------------------------------- автотест
