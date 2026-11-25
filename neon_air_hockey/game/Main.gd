@@ -31,10 +31,16 @@ const PUCK_FRICTION := 0.10       # экспоненциальное затух�
 const WALL_BOUNCE := 0.92
 const HIT_BOUNCE := 0.86
 const PAD_RATE := 14.0            # скорость сглаживания ракетки
-const HEAD_RATE := 12.0           # скорость сглаживания "головы"
-const RANGE_X := 0.11             # ход головы по X кадра до края стола (доля кадра)
-const RANGE_Y := 0.13             # ход головы по Y кадра до края своей половины
-const DEADZONE := 0.006           # мёртвая зона в долях кадра
+const INPUT_RATE := 12.0          # сглаживание входа (наклон корпуса)
+const RANGE_LEAN := 0.22          # наклон в долях роста до края стола
+const RANGE_PROX := 0.18          # изменение body_height (шаг к камере) до края
+const DEADZONE := 0.10            # мёртвая зона в долях полного отклонения
+const HEAD_CONF := 0.35           # ниже — считаем голову ненадёжной
+const FEET_CONF := 0.30           # ниже — лодыжки ненадёжны
+const GESTURE_CONF := 0.75        # порог уверенности жеста (как в документе)
+const PUSH_TIME := 0.35           # спад толчка после жеста, с
+const PUSH_DIST := 95.0           # насколько вперёд выдвигается ракетка толчком, px
+const FALLBACK_ASPECT := 16.0 / 9.0   # если frame_size не пришёл
 const STALE := 0.5                # порог устаревания трекинга, с
 const LOST_GRACE := 8.0           # сколько ждём пропавшего игрока, с
 
@@ -46,6 +52,7 @@ const C_RIGHT := Color(1.0, 0.239, 0.949)
 const C_PUCK := Color(1.0, 0.953, 0.690)
 const C_TEXT := Color(0.88, 0.92, 1.0)
 const C_DIM := Color(0.62, 0.66, 0.92, 0.85)
+const C_TENTATIVE := Color(1.0, 0.73, 0.25)
 
 const STATE_NAMES := {
 	St.WAITING: "WAITING", St.READY: "READY", St.PLAY: "PLAY",
@@ -67,12 +74,22 @@ class Paddle:
 	var track_id := -1
 	var dir := 1.0                 # +1: левый игрок (вперёд = вправо), -1: правый
 	var team_color: Color = Color.WHITE
-	var head := Vector2.ZERO
-	var have_head := false
-	var neutral := Vector2.ZERO
-	var have_neutral := false
-	var sum := Vector2.ZERO
+	# вход: наклон корпуса (head.x - feet_mid.x в долях роста) и масштаб (body_height)
+	var lean := 0.0
+	var bh := 0.0
+	var have_input := false
+	var lean_sum := 0.0
+	var bh_sum := 0.0
 	var samples := 0
+	var lean_neutral := 0.0
+	var bh_neutral := 0.0
+	var have_neutral := false
+	var using_fallback := false    # нет головы — считаем по рамке
+	var legacy := false            # источник без позы: вход только по рамке
+	var blind_t := 0.0             # сколько секунд нет точки головы
+	var conf := 0.0
+	var push := 0.0                # 0..1, спад после жеста jump
+	var last_reacq := -1           # последний обработанный reacquired_sample_id
 	var target := Vector2.ZERO
 	var pos := Vector2.ZERO
 	var prev_pos := Vector2.ZERO
@@ -80,7 +97,8 @@ class Paddle:
 	var flash := 0.0
 
 	func reset_calibration() -> void:
-		sum = Vector2.ZERO
+		lean_sum = 0.0
+		bh_sum = 0.0
 		samples = 0
 		have_neutral = false
 
@@ -103,6 +121,15 @@ class Synth:
 		player.play()
 		pb = player.get_stream_playback() as AudioStreamGeneratorPlayback
 		ok = pb != null
+
+	func stop() -> void:
+		# Без этого Godot ругается "ObjectDB instances leaked at exit":
+		# генератор держит AudioStreamGeneratorPlayback до самого выхода.
+		tones.clear()
+		pb = null
+		if player != null:
+			player.stop()
+			player.stream = null
 
 	func tone(f0: float, f1: float, dur: float, amp: float, delay := 0.0) -> void:
 		if ok:
@@ -155,6 +182,8 @@ var st_stage := 0
 var st_ref := 0.0
 var st_mark := 0.0
 var gesture_count := 0
+var phase_count := 0
+var push_count := 0
 var acc := 0.0
 var shake := 0.0
 var stall_t := 0.0
@@ -167,8 +196,10 @@ var synth := Synth.new()
 func _ready() -> void:
 	bridge = get_node("/root/GameDirector")
 	bridge.gesture.connect(_on_gesture)
+	bridge.gesture_phase.connect(_on_gesture_phase)
 	rng.randomize()
-	synth.setup(self)
+	if not OS.get_cmdline_user_args().has("--no-audio"):
+		synth.setup(self)
 	var has_port := false
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--port="):
@@ -183,11 +214,39 @@ func _ready() -> void:
 		_start_demo_match()
 
 
-func _on_gesture(slot: int, _action: String, _confidence: float) -> void:
+func _exit_tree() -> void:
+	synth.stop()
+
+
+func _on_gesture(slot: int, action: String, confidence: float) -> void:
+	if action != "jump" or confidence < GESTURE_CONF:
+		return
 	gesture_count += 1
 	for s in sides:
 		if s.slot == slot:
 			s.flash = 1.0
+
+
+func _on_gesture_phase(slot: int, track_id: int, action: String, phase: String,
+		confidence: float, _at: float, duration: float) -> void:
+	if action != "jump" or confidence < GESTURE_CONF:
+		return
+	phase_count += 1
+	if selftest == "log":
+		printerr("PHASE %-4s %s conf=%.2f dur=%.2f" % [action, phase, confidence, duration])
+	if phase != "start":
+		return
+	for s in sides:
+		if s.slot != slot or (track_id >= 0 and s.track_id != track_id):
+			continue
+		if s.push > 0.5:
+			return  # не наказываем за дребезг удержания
+		s.push = 1.0
+		s.flash = 1.0
+		push_count += 1
+		if selftest == "log":
+			printerr("PUSH slot=%d" % slot)
+		synth.tone(520.0, 900.0, 0.08, 0.3)
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -266,16 +325,23 @@ func _assign_sides(left, right) -> void:
 
 func _pause(reason: String) -> void:
 	pause_reason = reason
+	if selftest == "log":
+		printerr("PAUSE \"%s\"" % reason)
 	pause_grace = LOST_GRACE
 	synth.tone(300.0, 150.0, 0.2, 0.3)
 	_set_state(St.PAUSED)
 
 
-func _both_fresh() -> bool:
+func _both_ready() -> bool:
 	for s in sides:
-		if _fresh_pair(s) == null:
+		if not _side_ready(s):
 			return false
 	return true
+
+
+func _side_ready(s: Paddle) -> bool:
+	var p = _fresh_pair(s)
+	return p != null and str(p.state) == "confirmed"
 
 
 func _sync_sides(allow_rebind: bool) -> bool:
@@ -335,18 +401,23 @@ func _tick_ready(dt: float, tracking_ok: bool) -> void:
 	bridge.rotation_checkpoint()
 	if not demo:
 		if not tracking_ok:
-			_to_waiting()
+			_pause("Потерян сигнал трекинга")
 			return
-		for s in sides:
+		_sync_sides(true)
+		for i in sides.size():
+			var s = sides[i]
 			var p = _fresh_pair(s)
 			if p == null:
-				_to_waiting()
+				_pause("Игрок %d пропал из кадра" % (i + 1))
 				return
-			_update_side_head(s, p, dt)
-			if s.have_head:
-				s.sum += s.head
+			if str(p.state) != "confirmed":
+				_pause("Игрок %d: трек потерян" % (i + 1))
+				return
+			_update_side_input(s, p, dt)
+			if s.have_input:
+				s.lean_sum += s.lean
+				s.bh_sum += s.bh
 				s.samples += 1
-				s.neutral = s.sum / float(s.samples)
 	for s in sides:
 		s.target = _side_base(s)
 		s.pos = s.pos.lerp(s.target, 1.0 - exp(-PAD_RATE * dt))
@@ -357,10 +428,16 @@ func _tick_ready(dt: float, tracking_ok: bool) -> void:
 	if state_t >= ready_dur:
 		if not demo:
 			for s in sides:
-				if s.samples < 5:
+				if s.samples < 5 or not s.have_input:
 					_to_waiting()
 					return
+				s.lean_neutral = s.lean_sum / float(s.samples)
+				s.bh_neutral = s.bh_sum / float(s.samples)
 				s.have_neutral = true
+				s.legacy = s.using_fallback
+				if selftest == "log":
+					printerr("CALIB slot=%d lean=%.4f bh=%.4f fallback=%s" % [
+						s.slot, s.lean_neutral, s.bh_neutral, s.using_fallback])
 		synth.tone(990.0, 990.0, 0.15, 0.35)
 		_serve(next_serve)
 		_set_state(St.PLAY)
@@ -381,7 +458,21 @@ func _tick_play(dt: float, tracking_ok: bool) -> void:
 			if p == null:
 				_pause("Игрок %d пропал из кадра" % (i + 1))
 				return
-			_update_side_head(s, p, dt)
+			if str(p.state) != "confirmed":
+				_pause("Игрок %d: трек потерян" % (i + 1))
+				return
+			if p.reacquired and p.reacquired_sample_id != s.last_reacq:
+				s.last_reacq = p.reacquired_sample_id
+				_pause("Игрок %d вернулся в кадр" % (i + 1))
+				return
+			_update_side_input(s, p, dt)
+			if not s.legacy and p.head.is_empty():
+				s.blind_t += dt
+				if s.blind_t > 2.0:
+					_pause("Игрок %d: потеряна точка головы" % (i + 1))
+					return
+			else:
+				s.blind_t = 0.0
 			s.target = _side_target(s)
 	elif selftest == "physics":
 		# Скриптовый матч: левый бьёт вперёд, правый уходит в угол.
@@ -405,7 +496,7 @@ func _tick_goal(_dt: float, tracking_ok: bool) -> void:
 	bridge.rotation_checkpoint()
 	if state_t < 2.0:
 		return
-	if demo or (tracking_ok and _sync_sides(true) and _both_fresh()):
+	if demo or (tracking_ok and _sync_sides(true) and _both_ready()):
 		for s in sides:
 			s.reset_calibration()
 		ready_dur = 2.0
@@ -417,7 +508,7 @@ func _tick_goal(_dt: float, tracking_ok: bool) -> void:
 func _tick_paused(dt: float, tracking_ok: bool) -> void:
 	bridge.rotation_checkpoint()
 	pause_grace -= dt
-	if tracking_ok and _sync_sides(true) and _both_fresh():
+	if tracking_ok and _sync_sides(true) and _both_ready():
 		rebind_pending = false
 		for s in sides:
 			s.reset_calibration()
@@ -433,7 +524,7 @@ func _tick_over(_dt: float, tracking_ok: bool) -> void:
 		return
 	if demo:
 		return  # реванш по Пробелу
-	if tracking_ok and _sync_sides(true) and _both_fresh():
+	if tracking_ok and _sync_sides(true) and _both_ready():
 		scores = [0, 0]
 		for s in sides:
 			s.reset_calibration()
@@ -467,6 +558,11 @@ func _process(dt: float) -> void:
 			_tick_paused(dt, tracking_ok)
 		St.OVER:
 			_tick_over(dt, tracking_ok)
+	if selftest == "log" and Engine.get_process_frames() % 30 == 0:
+		for s in sides:
+			if s.have_input:
+				printerr("INPUT slot=%d lean=%+.4f bh=%.4f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
+					s.slot, s.lean, s.bh, s.using_fallback, s.conf, s.pos.x, s.pos.y])
 	if selftest != "":
 		_selftest_tick()
 	queue_redraw()
@@ -475,25 +571,62 @@ func _process(dt: float) -> void:
 # ---------------------------------------------------------------- управление
 
 
-func _update_side_head(s: Paddle, p, dt: float) -> void:
-	var r: Rect2 = p.camera_rect_norm
-	var h := Vector2(-1.0, -1.0)
-	if r.size.x > 0.001 and r.size.y > 0.001:
-		h = Vector2(r.position.x + r.size.x * 0.5, r.position.y)
-	elif p.feet_norm.size() == 2 and s.have_head:
-		# Рамки нет — берём X по лодыжкам, высоту держим прежнюю.
-		h = Vector2((p.feet_norm[0].x + p.feet_norm[1].x) * 0.5, s.head.y)
-	if h.x < 0.0:
-		return
-	if not s.have_head:
-		s.head = h
-		s.have_head = true
+func _aspect() -> float:
+	# Точки нормированы отдельно по ширине и высоте кадра, поэтому X нужно
+	# приводить к единицам высоты. frame_size может быть нулевым у старого источника.
+	if bridge.frame_size.y > 0:
+		return float(bridge.frame_size.x) / float(bridge.frame_size.y)
+	return FALLBACK_ASPECT
+
+
+func _update_side_input(s: Paddle, p, dt: float) -> void:
+	var aspect := _aspect()
+	var have_feet: bool = p.feet_norm.size() == 2 and p.feet_confidence >= FEET_CONF
+	var feet_mid := Vector2.ZERO
+	if have_feet:
+		feet_mid = (p.feet_norm[0] + p.feet_norm[1]) * 0.5
+	var head := Vector2.ZERO
+	var bh: float = p.body_height
+	var conf := 0.0
+	var lean := 0.0
+	var have := false
+	var hp = p.head.get("p")
+	if hp is Vector2 and bh > 0.01 and have_feet:
+		conf = float(p.head.get("conf", 0.0))
+		if conf >= HEAD_CONF:
+			head = hp
+			have = true
+	s.using_fallback = not have
+	if have:
+		# Основной путь: наклон корпуса относительно своей опоры.
+		lean = (head.x - feet_mid.x) * aspect / bh
 	else:
-		s.head = s.head.lerp(h, 1.0 - exp(-HEAD_RATE * dt))
+		if s.have_neutral and not s.legacy:
+			return   # поза была, но точка головы пропала: держим последнее значение
+		# Калибровка без позы (или старый источник): считаем по рамке.
+		# Абсолютная позиция корпуса, нейтраль вычтется калибровкой.
+		# нейтраль вычтется калибровкой.
+		var rect: Rect2 = p.camera_rect_norm
+		if rect.size.y <= 0.01:
+			return
+		bh = rect.size.y
+		lean = (rect.position.x + rect.size.x * 0.5) * aspect / bh
+		conf = p.feet_confidence
+	if bh <= 0.01:
+		return
+	var k := 1.0 - exp(-INPUT_RATE * dt)
+	if s.have_input:
+		s.lean = lerpf(s.lean, lean, k)
+		s.bh = lerpf(s.bh, bh, k)
+	else:
+		s.lean = lean
+		s.bh = bh
+		s.have_input = true
+	s.conf = conf
 
 
 func _dz(v: float) -> float:
-	return signf(v) * maxf(absf(v) - DEADZONE, 0.0)
+	return signf(v) * maxf(absf(v) - DEADZONE, 0.0) / (1.0 - DEADZONE)
 
 
 func _side_bounds(s: Paddle) -> Rect2:
@@ -514,14 +647,16 @@ func _side_base(s: Paddle) -> Vector2:
 
 func _side_target(s: Paddle) -> Vector2:
 	var base := _side_base(s)
-	if not s.have_neutral or not s.have_head:
+	if not s.have_neutral or not s.have_input or s.bh_neutral <= 0.01:
 		return base
 	var b := _side_bounds(s)
-	var dx := _dz(s.head.x - s.neutral.x)
-	var dy := _dz(s.neutral.y - s.head.y)
+	# ось 1: наклон корпуса влево/вправо (в долях роста, ноль — калибровка)
+	var lat := _dz(clampf((s.lean - s.lean_neutral) / RANGE_LEAN, -1.0, 1.0))
+	# ось 2: шаг к камере/от камеры по изменению body_height
+	var dep := _dz(clampf((s.bh / s.bh_neutral - 1.0) / RANGE_PROX, -1.0, 1.0))
 	var t := base
-	t.y += clampf(dx / RANGE_X, -1.0, 1.0) * (TABLE.size.y * 0.5 - PAD_R - 8.0)
-	t.x += clampf(dy / RANGE_Y, -1.0, 1.0) * (b.size.x * 0.5 - 4.0) * s.dir
+	t.y += lat * (TABLE.size.y * 0.5 - PAD_R - 8.0)
+	t.x += (dep * (b.size.x * 0.5 - 4.0) + s.push * PUSH_DIST) * s.dir
 	return Vector2(clampf(t.x, b.position.x, b.end.x), clampf(t.y, b.position.y, b.end.y))
 
 
@@ -577,6 +712,7 @@ func _physics_step(h: float) -> void:
 		s.prev_pos = s.pos
 		s.pos = s.pos.lerp(s.target, 1.0 - exp(-PAD_RATE * h))
 		s.vel = (s.pos - s.prev_pos) / h
+		s.push = maxf(0.0, s.push - h / PUSH_TIME)
 	puck_pos += puck_vel * h
 	puck_vel *= exp(-PUCK_FRICTION * h)
 	if puck_vel.length() < 14.0:
@@ -731,8 +867,9 @@ func _selftest_tick() -> void:
 							st_ref = sides[0].target.y
 							st_mark = st_t
 				3:
-					if gesture_count > 0:
-						print("SELFTEST PROTOCOL PASS: жесты получены (", gesture_count, ")")
+					if gesture_count > 0 and push_count > 0:
+						print("SELFTEST PROTOCOL PASS: жесты получены (", gesture_count,
+							", фаз ", phase_count, ", толчков ", push_count, ")")
 						get_tree().quit(0)
 			if st_t > 30.0:
 				print("SELFTEST PROTOCOL FAIL: этап ", st_stage, " state=", state)
@@ -907,7 +1044,37 @@ func _draw_hud() -> void:
 		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт", Vector2(960, 1010), 24, C_DIM)
 	else:
 		_text("Голова влево-вправо — ракетка вверх-вниз  ·  присед/выпрямление — ракетка вперёд-назад", Vector2(960, 1010), 24, C_DIM)
-		_text("Во время отсчёта стойте ровно: калибруется нейтральное положение головы", Vector2(960, 1044), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+		_text("Во время отсчёта стойте ровно: калибруется нейтральное положение корпуса", Vector2(960, 1044), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+	_draw_input_bars()
+	var st: Dictionary = bridge.tracking_stats()
+	var lat: Dictionary = st.get("latency_ms", {})
+	var jit: Dictionary = st.get("jitter_ms", {})
+	if not lat.is_empty():
+		_text("задержка входа p95 %.0f мс · джиттер %.1f мс · кадр %dx%d" % [
+			float(lat.get("p95", 0.0)), float(jit.get("p95", 0.0)),
+			bridge.frame_size.x, bridge.frame_size.y], Vector2(960, 972), 20,
+			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
+
+
+func _draw_input_bars() -> void:
+	# Тонкие вертикальные полосы: насколько наклонён корпус и не деградировал ли вход.
+	var i := 0
+	for s in sides:
+		var x := 250.0 if i == 0 else 1670.0
+		var top := 300.0
+		var h := 240.0
+		var col: Color = s.team_color
+		if s.using_fallback:
+			col = Color(1.0, 1.0, 1.0, 0.55)   # вход по рамке, а не по позе
+		draw_rect(Rect2(x - 4.0, top, 8.0, h), Color(0.0, 0.0, 0.0, 0.4))
+		var v := 0.0
+		if s.have_neutral and s.have_input:
+			v = clampf((s.lean - s.lean_neutral) / RANGE_LEAN, -1.0, 1.0)
+		var cy := top + h * 0.5 + v * h * 0.5
+		draw_rect(Rect2(x - 7.0, cy - 7.0, 14.0, 14.0), col)
+		draw_line(Vector2(x - 12.0, top + h * 0.5), Vector2(x + 12.0, top + h * 0.5),
+			Color(col.r, col.g, col.b, 0.3), 1.0)
+		i += 1
 
 
 func _draw_message() -> void:
@@ -916,8 +1083,11 @@ func _draw_message() -> void:
 		St.WAITING:
 			_text("ВСТАНЬТЕ ВДВОЁМ ПЕРЕД КАМЕРОЙ", mid + Vector2(0, -40), 44, C_TEXT)
 			_text("кто левее в кадре — игрок 1 (голубой), кто правее — игрок 2 (розовый)", mid + Vector2(0, 10), 26, C_DIM)
+			var tent: Array = bridge.tentative_players()
+			if not tent.is_empty():
+				_text("человека видно, подтверждаю трек…", mid + Vector2(0, 52), 26, C_TENTATIVE)
 			if demo:
-				_text("или нажмите Пробел для демо-матча на клавиатуре", mid + Vector2(0, 52), 26, C_DIM)
+				_text("или нажмите Пробел для демо-матча на клавиатуре", mid + Vector2(0, 84), 26, C_DIM)
 		St.READY:
 			var c := clampi(ceili(ready_dur - state_t), 1, 9)
 			_digit(mid + Vector2(-35, -130), Vector2(70, 110), c, C_TEXT)

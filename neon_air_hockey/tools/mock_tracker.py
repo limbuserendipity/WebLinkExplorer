@@ -1,25 +1,41 @@
 #!/usr/bin/env python3
-"""Эмулятор системы трекинга Godot AR API v1 — два игрока для Neon Air Hockey.
+"""Эмулятор системы трекинга Godot AR API v2 — два игрока для Neon Air Hockey.
 
 Запустите скрипт, затем выполните напечатанную команду из корня проекта
 neon_air_hockey/ (замените `godot` на путь к Godot 4.5.1 при необходимости).
 
-Игроки двигают "головой" (верхней центральной точкой рамки) по синусоиде,
-периодически подают жест jump. Сценарии для приёмочных проверок:
+Игроки стоят на месте, а корпусом покачиваются влево-вправо (это единственная
+ось управления), плюс периодически «прыгают» — жест приходит фазами
+start / hold / end. body_height слегка меняется, имитируя шаг к камере.
 
-  --leave T    на T-й секунде правый игрок уходит из кадра на --gone-for секунд
-               и возвращается с ТЕМ ЖЕ track_id (проверка паузы и возврата);
-  --swap T     на T-й секунде у правого игрока меняется track_id при том же
-               slot (новый человек — игра должна сбросить его состояние);
-  --empty T    на T-й секунде список players пуст на --gone-for секунд;
-  --stale T    на T-й секунде пакеты не отправляются --gone-for секунд
-               (соединение живо, данные устаревают);
-  --drop T     на T-й секунде соединение закрывается (игра должна завершиться);
-  --lowconf    жесты с confidence 0.45 (ниже порога 0.75 из примера документа);
-  --video      слать JPEG-кадры ~10 к/с (нужен Pillow; без него — предупреждение);
-  --duration S завершиться через S секунд (0 = бесконечно).
+Сценарии для приёмочных проверок:
 
-Пример: python3 tools/mock_tracker.py --leave 12 --video
+  --leave T     правый игрок уходит из кадра на --gone-for секунд и возвращается
+                с тем же track_id, затем помечается `reacquired`;
+  --swap T      у правого игрока меняется track_id при том же slot (новый человек);
+  --empty T     на --gone-for секунд список players пуст;
+  --stale T     на --gone-for секунд пакеты не отправляются (данные устаревают);
+  --drop T      на T-й секунде соединение закрывается (игра должна завершиться);
+  --lost T      на --gone-for секунд игрок приходит со state="lost", но свежими
+                измерениями (игра должна поставить паузу сразу);
+  --reacquire T на --gone-for секунд игрок помечается state="lost", затем на
+                0,3 с приходит с reacquired=true (возврат того же трека);
+  --reacq-flag T на 0,3 с приходит reacquired=true при state="confirmed"
+                (трекер сам сообщает о возврате, потеря не фиксировалась);
+  --lose-head T на --gone-for секунд точка головы пропадает (head пустой,
+                body_height = 0) — проверка фолбэка и «слепого» режима;
+  --legacy      слать пакеты в стиле API v1: без head/body_height/frame_size/
+                capabilities/tentative (проверка совместимости);
+  --lowconf     жесты с confidence 0.45 — ниже порога игры 0.75;
+  --video       слать JPEG-кадры ~10 к/с (нужен Pillow);
+  --hold S      длительность удержания жеста (по умолчанию 0.6 с);
+  --jump-every S период прыжков одного игрока (по умолчанию 3 с);
+  --duration S  завершиться через S секунд (0 = бесконечно);
+  --fps N       частота пакетов (по умолчанию 30).
+
+Примеры: python3 tools/mock_tracker.py --leave 12 --video
+         python3 tools/mock_tracker.py --lost 6 --gone-for 2
+         python3 tools/mock_tracker.py --legacy
 """
 import argparse
 import json
@@ -29,15 +45,65 @@ import struct
 import sys
 import time
 
+FRAME_W, FRAME_H = 640, 360
+FEET_Y = 0.75
+BODY = 0.53
 
-def make_player(slot, track_id, cx, top, color, n):
-    w, h = 0.16, 0.55
-    return {
-        "slot": slot, "track_id": track_id, "age_ticks": 0,
-        "color": color, "rect": [cx - w / 2, top, w, h],
-        "feet": [[cx - 0.05, top + h - 0.02], [cx + 0.05, top + h - 0.02]],
-        "feet_confidence": 0.92, "mask_slot": 0, "sample_id": n,
+
+def make_player(args, slot, track_id, cx, t, n, color):
+    """Один игрок: голова качается влево-вправо, ноги стоят."""
+    scale = 1.0 + 0.05 * math.sin(2 * math.pi * t / 7.0 + slot)   # шаг к камере/от камеры
+    body = BODY * scale
+    head_y = FEET_Y - body
+    sway = 0.09 * math.sin(2 * math.pi * t / (4.0 + 0.6 * slot) + slot * 1.7)
+    if args.legacy:
+        cx += sway          # без позы двигаем весь силуэт: рамка и есть вход
+    head_x = cx + sway
+    feet = [[cx - 0.05, FEET_Y], [cx + 0.05, FEET_Y]]
+    top = head_y - 0.04
+    height = FEET_Y - top
+    row = {
+        "slot": slot, "track_id": track_id, "age_ticks": 0, "color": color,
+        "rect": [round(cx - 0.10, 4), round(top, 4), 0.20, round(height, 4)],
+        "feet": feet, "feet_confidence": 0.93, "mask_slot": 0, "sample_id": n,
     }
+    if args.legacy:
+        return row
+    head = {"p": [round(head_x, 4), round(head_y, 4)], "conf": 0.96}
+    if args.lose_head is not None and args.lose_head <= t < args.lose_head + args.gone_for:
+        head = {}
+        body = 0.0
+    shoulders = [[round(head_x - 0.075, 4), round(head_y + 0.10, 4), 0.95],
+                 [round(head_x + 0.075, 4), round(head_y + 0.10, 4), 0.94]]
+    hips = [[round(cx - 0.06, 4), round(FEET_Y - body * 0.45, 4), 0.9],
+            [round(cx + 0.06, 4), round(FEET_Y - body * 0.45, 4), 0.9]]
+    wrists = [[round(head_x - 0.11, 4), round(head_y + 0.16, 4), 0.8],
+              [round(head_x + 0.11, 4), round(head_y + 0.16, 4), 0.8]]
+    ankles = [[feet[0][0], feet[0][1], 0.91], [feet[1][0], feet[1][1], 0.91]]
+    keypoints = [
+        [round(head_x, 4), round(head_y, 4), 0.97],          # нос
+        [round(head_x - 0.015, 4), round(head_y - 0.01, 4), 0.9],   # глаз Л
+        [round(head_x + 0.015, 4), round(head_y - 0.01, 4), 0.9],   # глаз П
+        [round(head_x - 0.035, 4), round(head_y, 4), 0.7],   # ухо Л
+        [round(head_x + 0.035, 4), round(head_y, 4), 0.7],   # ухо П
+        shoulders[0], shoulders[1],
+        [round(head_x - 0.10, 4), round(head_y + 0.20, 4), 0.8],    # локоть Л
+        [round(head_x + 0.10, 4), round(head_y + 0.20, 4), 0.8],    # локоть П
+        wrists[0], wrists[1],
+        hips[0], hips[1],
+        [round(cx - 0.06, 4), round(FEET_Y - body * 0.22, 4), 0.85],  # колено Л
+        [round(cx + 0.06, 4), round(FEET_Y - body * 0.22, 4), 0.85],  # колено П
+        ankles[0], ankles[1],
+    ]
+    if slot == 1:
+        keypoints[3] = None    # проверяем, что null в позе не ломает игру
+    row.update({
+        "head": head, "body_height": round(body, 4),
+        "shoulders": shoulders, "hips": hips, "wrists": wrists, "ankles": ankles,
+        "keypoints": keypoints, "state": "confirmed", "lost_since": -1.0,
+        "reacquired": False, "reacquired_sample_id": -1,
+    })
+    return row
 
 
 def render_jpeg(players, pil):
@@ -49,7 +115,10 @@ def render_jpeg(players, pil):
         box = [x * 320, y * 180, (x + w) * 320, (y + h) * 180]
         c = tuple(int(v * 255) for v in p["color"])
         d.rectangle(box, outline=c, width=2)
-        d.ellipse([box[0] + w * 160 - 4, box[1] - 4, box[0] + w * 160 + 4, box[1] + 4], fill=c)
+        head = p.get("head", {})
+        if head:
+            hx, hy = head["p"]
+            d.ellipse([hx * 320 - 4, hy * 180 - 4, hx * 320 + 4, hy * 180 + 4], fill=c)
     import io
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=70)
@@ -57,9 +126,10 @@ def render_jpeg(players, pil):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=0)
-    ap.add_argument("--rate", type=float, default=30.0)
+    ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--duration", type=float, default=0.0)
     ap.add_argument("--gone-for", type=float, default=3.0)
     ap.add_argument("--leave", type=float, default=None)
@@ -67,8 +137,15 @@ def main():
     ap.add_argument("--empty", type=float, default=None)
     ap.add_argument("--stale", type=float, default=None)
     ap.add_argument("--drop", type=float, default=None)
+    ap.add_argument("--lost", type=float, default=None)
+    ap.add_argument("--reacquire", type=float, default=None)
+    ap.add_argument("--reacq-flag", type=float, default=None)
+    ap.add_argument("--lose-head", type=float, default=None)
+    ap.add_argument("--legacy", action="store_true")
     ap.add_argument("--lowconf", action="store_true")
     ap.add_argument("--video", action="store_true")
+    ap.add_argument("--hold", type=float, default=0.6)
+    ap.add_argument("--jump-every", type=float, default=3.0)
     args = ap.parse_args()
 
     pil = None
@@ -77,7 +154,7 @@ def main():
             from PIL import Image, ImageDraw
             pil = (Image, ImageDraw)
         except ImportError:
-            print("mock: Pillow не найден, видео отправляться не будет (pip install pillow)", flush=True)
+            print("mock: Pillow не найден, видео отправляться не будет", flush=True)
 
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -85,64 +162,131 @@ def main():
     server.listen(1)
     port = server.getsockname()[1]
     print(f"godot --path . -- --port={port}", flush=True)
-    print(f"mock: жду игру на 127.0.0.1:{port} (rate={args.rate:g}/s)", flush=True)
+    print(f"mock v2: жду игру на 127.0.0.1:{port} (fps={args.fps:g})", flush=True)
     connection, _ = server.accept()
-    print("mock: игра подключилась", flush=True)
+    print("mock v2: игра подключилась", flush=True)
 
     n = 0
     event_id = 0
     t0 = time.monotonic()
-    last_jump = [0, 0]
+    last_right = 77
     swapped = False
-    dropped = False
+    leave_logged = False
+    stale_logged = False
+    jumps = {0: {"next": 1.0, "active": False, "t0": 0.0, "last_hold": 0.0},
+             1: {"next": 1.6, "active": False, "t0": 0.0, "last_hold": 0.0}}
+    reacquire_until = -1.0
+    reacquire_logged = False
+    reacquire_done = False
+    reacq_flag_logged = False
     try:
         with connection:
             while True:
                 t = time.monotonic() - t0
                 if args.duration and t >= args.duration:
-                    print("mock: время вышло, закрываю соединение", flush=True)
+                    print("mock v2: время вышло", flush=True)
                     break
                 if args.drop is not None and t >= args.drop:
-                    print(f"mock: [{t:5.1f}s] обрыв соединения (--drop)", flush=True)
+                    print(f"mock v2: [{t:5.1f}s] обрыв соединения (--drop)", flush=True)
                     break
                 if args.stale is not None and args.stale <= t < args.stale + args.gone_for:
-                    if not dropped:
-                        print(f"mock: [{t:5.1f}s] пауза потока (--stale)", flush=True)
-                        dropped = True
-                    time.sleep(1 / args.rate)
+                    if not stale_logged:
+                        print(f"mock v2: [{t:5.1f}s] пауза потока (--stale)", flush=True)
+                        stale_logged = True
+                    time.sleep(1 / args.fps)
                     continue
-                dropped = False
+                stale_logged = False
 
-                track_right = 77
                 if args.swap is not None and t >= args.swap:
-                    track_right = 177
+                    last_right = 177
                     if not swapped:
-                        print(f"mock: [{t:5.1f}s] правый slot 1 получает новый track_id 177 (--swap)", flush=True)
+                        print(f"mock v2: [{t:5.1f}s] правый slot 1 получает track_id 177", flush=True)
                         swapped = True
 
-                players = []
-                if not (args.empty is not None and args.empty <= t < args.empty + args.gone_for):
-                    cx0 = 0.28 + 0.07 * math.sin(2 * math.pi * t / 4.0)
-                    top0 = 0.18 + 0.05 * math.sin(2 * math.pi * t / 5.3)
-                    players.append(make_player(0, 42, cx0, top0, [0.1, 0.8, 1.0], n))
-                    if not (args.leave is not None and args.leave <= t < args.leave + args.gone_for):
-                        cx1 = 0.72 + 0.07 * math.sin(2 * math.pi * t / 4.6 + 1.7)
-                        top1 = 0.18 + 0.05 * math.sin(2 * math.pi * t / 6.1 + 0.9)
-                        players.append(make_player(1, track_right, cx1, top1, [1.0, 0.25, 0.9], n))
-                    elif args.leave is not None and not getattr(main, "_leave_logged", False):
-                        print(f"mock: [{t:5.1f}s] правый игрок ушёл (--leave), вернётся через {args.gone_for:g} с", flush=True)
-                        main._leave_logged = True
+                right_gone = args.leave is not None and args.leave <= t < args.leave + args.gone_for
+                if right_gone and not leave_logged:
+                    print(f"mock v2: [{t:5.1f}s] правый игрок ушёл, вернётся через "
+                          f"{args.gone_for:g} с", flush=True)
+                    leave_logged = True
+                if args.leave is not None and t >= args.leave + args.gone_for and leave_logged:
+                    reacquire_until = t + 0.3
+                    leave_logged = False
 
-                gestures = []
+                players = []
+                tentatives = []
+                empty_now = args.empty is not None and args.empty <= t < args.empty + args.gone_for
+                if not empty_now:
+                    players.append(make_player(args, 0, 42, 0.28, t, n, [0.1, 0.8, 1.0]))
+                    if not right_gone:
+                        players.append(make_player(args, 1, last_right, 0.72, t, n,
+                                                   [1.0, 0.25, 0.9]))
+                    elif not args.legacy:
+                        tentatives.append({"track_id": last_right, "state": "tentative",
+                                           "sample_id": n, "rect": [0.62, 0.20, 0.18, 0.55]})
+                # состояние и возврат
+                if args.lost is not None and args.lost <= t < args.lost + args.gone_for:
+                    for row in players:
+                        row["state"] = "lost"
+                        row["lost_since"] = round(t - args.lost, 3)
+                if args.reacquire is not None:
+                    if args.reacquire <= t < args.reacquire + args.gone_for:
+                        for row in players:
+                            row["state"] = "lost"
+                            row["lost_since"] = round(t - args.reacquire, 3)
+                        if not reacquire_logged:
+                            print(f"mock v2: [{t:5.1f}s] трек потерян (--reacquire)", flush=True)
+                            reacquire_logged = True
+                    elif t >= args.reacquire + args.gone_for and t < args.reacquire + args.gone_for + 0.3:
+                        reacquire_until = t + 0.05
+                        if not reacquire_done:
+                            print(f"mock v2: [{t:5.1f}s] трек вернулся (reacquired=true)", flush=True)
+                            reacquire_done = True
+                for row in players:
+                    if row.get("track_id") == last_right and t < reacquire_until:
+                        row["reacquired"] = True
+                        row["reacquired_sample_id"] = n
+                if args.reacq_flag is not None and args.reacq_flag <= t < args.reacq_flag + 0.3:
+                    for row in players:
+                        row["reacquired"] = True
+                        row["reacquired_sample_id"] = n
+                    if not reacq_flag_logged:
+                        print(f"mock v2: [{t:5.1f}s] reacquired=true при confirmed (--reacq-flag)",
+                              flush=True)
+                        reacq_flag_logged = True
+
+                # жесты фазами
+                gestures, phases = [], []
                 conf = 0.45 if args.lowconf else 0.95
-                for i, p in enumerate(players):
-                    period = 2.4 if i == 0 else 3.1
-                    k = int((t + (0.0 if i == 0 else 1.1)) / period)
-                    if k > last_jump[i]:
-                        last_jump[i] = k
+                for row in players:
+                    js = jumps[row["slot"]]
+                    if js["active"]:
+                        if t - js["t0"] <= args.hold:
+                            if t - js["last_hold"] >= 0.09:
+                                js["last_hold"] = t
+                                event_id += 1
+                                phases.append({"id": event_id, "slot": row["slot"],
+                                               "track_id": row["track_id"], "action": "jump",
+                                               "phase": "hold", "confidence": conf,
+                                               "at": round(t, 3), "duration": round(t - js["t0"], 3)})
+                        else:
+                            js["active"] = False
+                            event_id += 1
+                            phases.append({"id": event_id, "slot": row["slot"],
+                                           "track_id": row["track_id"], "action": "jump",
+                                           "phase": "end", "confidence": conf,
+                                           "at": round(t, 3), "duration": round(t - js["t0"] + 0.05, 3)})
+                    elif t >= js["next"]:
+                        js["next"] = t + args.jump_every
+                        js["active"] = True
+                        js["t0"] = t
+                        js["last_hold"] = t
                         event_id += 1
-                        gestures.append({"id": event_id, "slot": p["slot"], "track_id": p["track_id"],
-                                         "action": "jump", "confidence": conf})
+                        ev = {"id": event_id, "slot": row["slot"], "track_id": row["track_id"],
+                              "action": "jump", "confidence": conf, "at": round(t, 3),
+                              "duration": 0.0}
+                        if not args.legacy:
+                            ev["phase"] = "start"
+                        gestures.append(ev)
 
                 images = b""
                 frame_age = None
@@ -150,17 +294,26 @@ def main():
                     images = render_jpeg(players, pil)
                     frame_age = 0.0
 
-                packet = {"frame_id": n, "tracking_age": 0.0, "frame_age": frame_age,
-                          "players": players, "gestures": gestures}
+                packet = {"frame_id": n, "tracking_age": 0.02 + 0.001 * (n % 5),
+                          "frame_age": frame_age, "players": players, "gestures": gestures}
+                if not args.legacy:
+                    packet.update({
+                        "capabilities": ["pose", "track_state", "gesture_phases"]
+                                        + (["video"] if pil else []),
+                        "frame_size": [FRAME_W, FRAME_H],
+                        "capture_time": round(t, 3), "tracking_time": round(t + 0.02, 3),
+                        "tentative_players": tentatives,
+                        "gesture_phases": phases,
+                    })
                 body = json.dumps(packet).encode("utf-8")
                 connection.sendall(struct.pack("!II", len(body), len(images)) + body + images)
                 n += 1
-                time.sleep(1 / args.rate)
+                time.sleep(1 / args.fps)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-        print("mock: игра закрыла соединение", flush=True)
+        print("mock v2: игра закрыла соединение", flush=True)
     finally:
         server.close()
-    print("mock: завершён", flush=True)
+    print("mock v2: завершён, пакетов:", n, flush=True)
 
 
 if __name__ == "__main__":
