@@ -31,12 +31,18 @@ const PUCK_FRICTION := 0.10       # экспоненциальное затух�
 const WALL_BOUNCE := 0.92
 const HIT_BOUNCE := 0.86
 const PAD_RATE := 14.0            # скорость сглаживания ракетки
-const INPUT_RATE := 12.0          # сглаживание входа (наклон корпуса)
-const RANGE_LEAN := 0.22          # наклон в долях роста до края стола
-const RANGE_PROX := 0.18          # изменение body_height (шаг к камере) до края
+const INPUT_RATE := 12.0          # сглаживание входа
+const RANGE_FACE_X := 0.14        # ход лица по X до края половины (доли высоты кадра)
+const RANGE_FACE_Y := 0.08        # ход лица по Y (наклон/шаг головой)
+const RANGE_TILT_X := 0.20        # поворот головы (в долях расстояния между глазами)
+const RANGE_TILT_Y := 0.22        # наклон головы набок, радианы
+const RANGE_LEAN := 0.22          # наклон корпуса в долях роста
+const RANGE_PROX := 0.18          # изменение body_height (шаг к камере)
 const DEADZONE := 0.10            # мёртвая зона в долях полного отклонения
 const HEAD_CONF := 0.35           # ниже — считаем голову ненадёжной
 const FEET_CONF := 0.30           # ниже — лодыжки ненадёжны
+const POINT_CONF := 0.30          # ниже — точка позы ненадёжна
+const CONTROL_MODES := ["face", "tilt", "lean"]
 const GESTURE_CONF := 0.75        # порог уверенности жеста (как в документе)
 const PUSH_TIME := 0.35           # спад толчка после жеста, с
 const PUSH_DIST := 95.0           # насколько вперёд выдвигается ракетка толчком, px
@@ -74,15 +80,19 @@ class Paddle:
 	var track_id := -1
 	var dir := 1.0                 # +1: левый игрок (вперёд = вправо), -1: правый
 	var team_color: Color = Color.WHITE
-	# вход: наклон корпуса (head.x - feet_mid.x в долях роста) и масштаб (body_height)
-	var lean := 0.0
-	var bh := 0.0
+	# вход: две оси в своих единицах, нейтраль снимается в отсчёт
+	var rawx := 0.0
+	var rawy := 0.0
+	var nx := 0.0
+	var ny := 0.0
+	var range_x := 0.14
+	var range_y := 0.08
+	var ax := 0.0                  # -1..1, по X (вперёд-назад по столу)
+	var ay := 0.0                  # -1..1, по Y (вверх-вниз по столу)
 	var have_input := false
-	var lean_sum := 0.0
-	var bh_sum := 0.0
+	var sumx := 0.0
+	var sumy := 0.0
 	var samples := 0
-	var lean_neutral := 0.0
-	var bh_neutral := 0.0
 	var have_neutral := false
 	var using_fallback := false    # нет головы — считаем по рамке
 	var legacy := false            # источник без позы: вход только по рамке
@@ -97,10 +107,19 @@ class Paddle:
 	var flash := 0.0
 
 	func reset_calibration() -> void:
-		lean_sum = 0.0
-		bh_sum = 0.0
+		sumx = 0.0
+		sumy = 0.0
 		samples = 0
 		have_neutral = false
+		have_input = false
+		rawx = 0.0
+		rawy = 0.0
+		ax = 0.0
+		ay = 0.0
+		using_fallback = false
+		legacy = false
+		blind_t = 0.0
+		conf = 0.0
 
 
 ## Ретро-синтезатор: прямоугольные волны через AudioStreamGenerator, без ассетов.
@@ -177,6 +196,16 @@ var next_serve := 0
 var last_count := -1
 var demo := false
 var selftest := ""
+var input_mode := "face"          # face | tilt | lean (--control=)
+var gain := 1.0                   # множитель чувствительности (--gain=)
+var flip_x := 1.0
+var flip_y := 1.0
+var debug_ui := false             # --debug: панель с числами ввода
+var record_path := ""             # --record=файл.jsonl: запись трассы ввода
+var record_file: FileAccess
+var record_t0 := 0.0
+var record_events: Array = []
+var record_last: Dictionary = {}
 var st_t := 0.0
 var st_stage := 0
 var st_ref := 0.0
@@ -208,7 +237,28 @@ func _ready() -> void:
 			selftest = arg.trim_prefix("--selftest=")
 		elif arg.begins_with("--win-score="):
 			win_score = maxi(1, int(arg.trim_prefix("--win-score=")))
+		elif arg.begins_with("--control="):
+			input_mode = arg.trim_prefix("--control=").to_lower()
+		elif arg.begins_with("--gain="):
+			gain = clampf(float(arg.trim_prefix("--gain=")), 0.1, 5.0)
+		elif arg.begins_with("--record="):
+			record_path = arg.trim_prefix("--record=")
+		elif arg == "--flip-x":
+			flip_x = -1.0
+		elif arg == "--flip-y":
+			flip_y = -1.0
+		elif arg == "--debug":
+			debug_ui = true
 	demo = not has_port
+	if not CONTROL_MODES.has(input_mode):
+		input_mode = "face"
+	if record_path != "":
+		record_file = FileAccess.open(record_path, FileAccess.WRITE)
+		record_t0 = Time.get_ticks_msec() * 0.001
+		if record_file == null:
+			printerr("не смог открыть файл записи: ", record_path)
+		else:
+			printerr("пишу трассу ввода в ", record_path)
 	puck_pos = TABLE.position + TABLE.size * 0.5
 	if selftest == "physics":
 		_start_demo_match()
@@ -216,9 +266,56 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	synth.stop()
+	if record_file != null:
+		record_file.flush()
+		record_file = null
+
+
+func _record_event(e: Dictionary) -> void:
+	if record_file != null:
+		record_events.append(e)
+
+
+func _record_tick() -> void:
+	if record_file == null:
+		return
+	var players := []
+	for p in bridge.all_players():
+		if p.age_ticks > 90:
+			continue
+		if int(record_last.get(p.track_id, -99999)) == p.sample_id:
+			continue
+		record_last[p.track_id] = p.sample_id
+		var kp := []
+		for k in p.keypoints:
+			kp.append(null if k == null else [k.x, k.y, k.z])
+		var head := []
+		if not p.head.is_empty():
+			head = [p.head.p.x, p.head.p.y, p.head.conf]
+		var feet := []
+		for f in p.feet_norm:
+			feet.append([f.x, f.y])
+		players.append({
+			"slot": p.slot, "track_id": p.track_id, "state": p.state,
+			"color": [p.color.r, p.color.g, p.color.b],
+			"rect": [p.camera_rect_norm.position.x, p.camera_rect_norm.position.y,
+				p.camera_rect_norm.size.x, p.camera_rect_norm.size.y],
+			"head": head, "feet": feet, "feet_confidence": p.feet_confidence,
+			"body_height": p.body_height, "keypoints": kp,
+		})
+	if players.is_empty() and record_events.is_empty():
+		return
+	record_file.store_line(JSON.stringify({
+		"t": Time.get_ticks_msec() * 0.001 - record_t0,
+		"players": players, "events": record_events,
+	}))
+	record_events = []
+	record_file.flush()
 
 
 func _on_gesture(slot: int, action: String, confidence: float) -> void:
+	_record_event({"slot": slot, "track_id": -1, "action": action,
+		"phase": "start", "confidence": confidence})
 	if action != "jump" or confidence < GESTURE_CONF:
 		return
 	gesture_count += 1
@@ -229,6 +326,8 @@ func _on_gesture(slot: int, action: String, confidence: float) -> void:
 
 func _on_gesture_phase(slot: int, track_id: int, action: String, phase: String,
 		confidence: float, _at: float, duration: float) -> void:
+	_record_event({"slot": slot, "track_id": track_id, "action": action,
+		"phase": phase, "confidence": confidence})
 	if action != "jump" or confidence < GESTURE_CONF:
 		return
 	phase_count += 1
@@ -254,12 +353,29 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not demo:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_SPACE:
-			if state == St.WAITING or state == St.OVER:
-				_start_demo_match()
+		match event.keycode:
+			KEY_SPACE:
+				if state == St.WAITING or state == St.OVER:
+					_start_demo_match()
+			KEY_1, KEY_2, KEY_3:
+				_set_input_mode(CONTROL_MODES[[KEY_1, KEY_2, KEY_3].find(event.keycode)])
+			KEY_F1:
+				debug_ui = not debug_ui
 
 
 # ---------------------------------------------------------------- состояния
+
+
+func _set_input_mode(mode: String) -> void:
+	if not CONTROL_MODES.has(mode):
+		return
+	input_mode = mode
+	for s in sides:
+		s.reset_calibration()
+	if not demo and not sides.is_empty():
+		ready_dur = 1.5        # короткий отсчёт: режим сменился — нейтраль заново
+		_set_state(St.READY)
+	printerr("режим ввода: ", mode)
 
 
 func _set_state(s: int) -> void:
@@ -367,6 +483,26 @@ func _sync_sides(allow_rebind: bool) -> bool:
 	return ok
 
 
+func _tick_blind(dt: float) -> void:
+	# Точка головы пропала, хотя поза в пакете есть (нос/глаза на месте): играем
+	# «слепо» 2 с, потом пауза. Считаем в READY/PLAY/GOAL — иначе гол успевает
+	# сбросить окно и потеря головы остаётся незамеченной.
+	if demo or state == St.WAITING or state == St.PAUSED or state == St.OVER:
+		return
+	for s in sides:
+		if not s.have_input:
+			continue
+		var p = _fresh_pair(s)
+		var headless: bool = p != null and not s.legacy 			and not p.keypoints.is_empty() and p.head.is_empty()
+		if not headless:
+			s.blind_t = 0.0
+			continue
+		s.blind_t += dt
+		if s.blind_t > 2.0:
+			_pause("Игрок %d: потеряна точка головы" % (s.slot + 1))
+			return
+
+
 func _fresh_pair(s: Paddle):
 	for p in bridge.players():
 		if p.slot == s.slot and p.track_id == s.track_id:
@@ -415,8 +551,8 @@ func _tick_ready(dt: float, tracking_ok: bool) -> void:
 				return
 			_update_side_input(s, p, dt)
 			if s.have_input:
-				s.lean_sum += s.lean
-				s.bh_sum += s.bh
+				s.sumx += s.rawx
+				s.sumy += s.rawy
 				s.samples += 1
 	for s in sides:
 		s.target = _side_base(s)
@@ -431,13 +567,14 @@ func _tick_ready(dt: float, tracking_ok: bool) -> void:
 				if s.samples < 5 or not s.have_input:
 					_to_waiting()
 					return
-				s.lean_neutral = s.lean_sum / float(s.samples)
-				s.bh_neutral = s.bh_sum / float(s.samples)
+				s.nx = s.sumx / float(s.samples)
+				s.ny = s.sumy / float(s.samples)
 				s.have_neutral = true
 				s.legacy = s.using_fallback
+				_update_axes(s)
 				if selftest == "log":
-					printerr("CALIB slot=%d lean=%.4f bh=%.4f fallback=%s" % [
-						s.slot, s.lean_neutral, s.bh_neutral, s.using_fallback])
+					printerr("CALIB slot=%d mode=%s nx=%.4f ny=%.4f fallback=%s" % [
+						s.slot, input_mode, s.nx, s.ny, s.using_fallback])
 		synth.tone(990.0, 990.0, 0.15, 0.35)
 		_serve(next_serve)
 		_set_state(St.PLAY)
@@ -466,13 +603,6 @@ func _tick_play(dt: float, tracking_ok: bool) -> void:
 				_pause("Игрок %d вернулся в кадр" % (i + 1))
 				return
 			_update_side_input(s, p, dt)
-			if not s.legacy and p.head.is_empty():
-				s.blind_t += dt
-				if s.blind_t > 2.0:
-					_pause("Игрок %d: потеряна точка головы" % (i + 1))
-					return
-			else:
-				s.blind_t = 0.0
 			s.target = _side_target(s)
 	elif selftest == "physics":
 		# Скриптовый матч: левый бьёт вперёд, правый уходит в угол.
@@ -558,11 +688,14 @@ func _process(dt: float) -> void:
 			_tick_paused(dt, tracking_ok)
 		St.OVER:
 			_tick_over(dt, tracking_ok)
+	_tick_blind(dt)
+	_record_tick()
 	if selftest == "log" and Engine.get_process_frames() % 30 == 0:
 		for s in sides:
 			if s.have_input:
-				printerr("INPUT slot=%d lean=%+.4f bh=%.4f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
-					s.slot, s.lean, s.bh, s.using_fallback, s.conf, s.pos.x, s.pos.y])
+				printerr("INPUT slot=%d mode=%s raw=(%+.4f, %+.4f) neutral=(%+.4f, %+.4f) range=(%.4f, %.4f) ax=%+.2f ay=%+.2f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
+					s.slot, input_mode, s.rawx, s.rawy, s.nx, s.ny, s.range_x, s.range_y,
+					s.ax, s.ay, s.using_fallback, s.conf, s.pos.x, s.pos.y])
 	if selftest != "":
 		_selftest_tick()
 	queue_redraw()
@@ -581,48 +714,123 @@ func _aspect() -> float:
 
 func _update_side_input(s: Paddle, p, dt: float) -> void:
 	var aspect := _aspect()
+	if input_mode == "tilt" and _input_tilt(s, p, aspect, dt):
+		return
+	if input_mode == "lean":
+		_input_lean(s, p, aspect, dt)
+	else:
+		_input_face(s, p, aspect, dt)
+
+
+func _update_axes(s: Paddle) -> void:
+	if not s.have_neutral:
+		s.ax = 0.0
+		s.ay = 0.0
+		return
+	var rgx := maxf(s.range_x, 0.0001)
+	var rgy := maxf(s.range_y, 0.0001)
+	s.ax = clampf(_dz(clampf((s.rawx - s.nx) / rgx, -1.0, 1.0)) * gain * flip_x, -1.0, 1.0)
+	s.ay = clampf(_dz(clampf((s.rawy - s.ny) / rgy, -1.0, 1.0)) * gain * flip_y, -1.0, 1.0)
+
+
+func _feed(s: Paddle, rx: float, ry: float, rgx: float, rgy: float,
+		conf: float, dt: float) -> void:
+	var k := 1.0 - exp(-INPUT_RATE * dt)
+	if s.have_input:
+		s.rawx = lerpf(s.rawx, rx, k)
+		s.rawy = lerpf(s.rawy, ry, k)
+	else:
+		s.rawx = rx
+		s.rawy = ry
+		s.have_input = true
+	s.range_x = maxf(rgx, 0.0001)
+	s.range_y = maxf(rgy, 0.0001)
+	s.conf = conf
+	_update_axes(s)
+
+
+func _nose_point(p):
+	# Нос из 17 точек позы, иначе середина глаз/носа из поля head.
+	var kp: Array = p.keypoints
+	if kp.size() > 0 and kp[0] != null and kp[0].z >= POINT_CONF:
+		return Vector2(kp[0].x, kp[0].y)
+	var hp = p.head.get("p")
+	if hp is Vector2 and float(p.head.get("conf", 0.0)) >= HEAD_CONF:
+		return hp
+	return null
+
+
+func _input_face(s: Paddle, p, aspect: float, dt: float) -> void:
+	# Лицо — это курсор: положение носа в кадре относительно калибровки.
+	var nose = _nose_point(p)
+	s.using_fallback = nose == null
+	if nose == null:
+		if s.have_neutral and not s.legacy:
+			return    # поза была, голова пропала — держим последнее значение
+		var rect: Rect2 = p.camera_rect_norm
+		if rect.size.y <= 0.01:
+			return
+		s.legacy = not s.have_neutral
+		_feed(s, (rect.position.x + rect.size.x * 0.5) * aspect, rect.position.y,
+			RANGE_FACE_X, RANGE_FACE_Y, p.feet_confidence, dt)
+		return
+	_feed(s, nose.x * aspect, nose.y, RANGE_FACE_X, RANGE_FACE_Y,
+		float(p.head.get("conf", p.feet_confidence)), dt)
+
+
+func _input_tilt(s: Paddle, p, aspect: float, dt: float) -> bool:
+	# Наклон головы набок (roll) и поворот (yaw) по точкам глаз и носа.
+	var kp: Array = p.keypoints
+	if kp.size() < 5:
+		return false
+	var nose = kp[0]
+	var eye_l = kp[1]
+	var eye_r = kp[2]
+	for pt in [nose, eye_l, eye_r]:
+		if pt == null or pt.z < POINT_CONF:
+			return false
+	var a := Vector2(eye_l.x * aspect, eye_l.y)
+	var b := Vector2(eye_r.x * aspect, eye_r.y)
+	var n := Vector2(nose.x * aspect, nose.y)
+	var axis := b - a
+	var d := axis.length()
+	if d < 0.006:
+		return false   # лицо слишком мелкое в кадре — шум
+	var roll := atan2(axis.y, axis.x)
+	var mid := (a + b) * 0.5
+	var yaw := (n - mid).dot(axis / d) / d
+	s.using_fallback = false
+	_feed(s, yaw, roll, RANGE_TILT_X, RANGE_TILT_Y, float(nose.z), dt)
+	return true
+
+
+func _input_lean(s: Paddle, p, aspect: float, dt: float) -> void:
+	# Классический вариант: наклон корпуса относительно лодыжек + шаг к камере.
 	var have_feet: bool = p.feet_norm.size() == 2 and p.feet_confidence >= FEET_CONF
 	var feet_mid := Vector2.ZERO
 	if have_feet:
 		feet_mid = (p.feet_norm[0] + p.feet_norm[1]) * 0.5
-	var head := Vector2.ZERO
 	var bh: float = p.body_height
-	var conf := 0.0
-	var lean := 0.0
-	var have := false
 	var hp = p.head.get("p")
-	if hp is Vector2 and bh > 0.01 and have_feet:
-		conf = float(p.head.get("conf", 0.0))
-		if conf >= HEAD_CONF:
-			head = hp
-			have = true
-	s.using_fallback = not have
-	if have:
-		# Основной путь: наклон корпуса относительно своей опоры.
-		lean = (head.x - feet_mid.x) * aspect / bh
+	var head_ok: bool = hp is Vector2 and bh > 0.01 and have_feet \
+		and float(p.head.get("conf", 0.0)) >= HEAD_CONF
+	s.using_fallback = not head_ok
+	var lean := 0.0
+	if head_ok:
+		s.legacy = false
+		lean = (hp.x - feet_mid.x) * aspect / bh
 	else:
 		if s.have_neutral and not s.legacy:
-			return   # поза была, но точка головы пропала: держим последнее значение
-		# Калибровка без позы (или старый источник): считаем по рамке.
-		# Абсолютная позиция корпуса, нейтраль вычтется калибровкой.
-		# нейтраль вычтется калибровкой.
+			return
 		var rect: Rect2 = p.camera_rect_norm
 		if rect.size.y <= 0.01:
 			return
+		s.legacy = not s.have_neutral
 		bh = rect.size.y
 		lean = (rect.position.x + rect.size.x * 0.5) * aspect / bh
-		conf = p.feet_confidence
-	if bh <= 0.01:
-		return
-	var k := 1.0 - exp(-INPUT_RATE * dt)
-	if s.have_input:
-		s.lean = lerpf(s.lean, lean, k)
-		s.bh = lerpf(s.bh, bh, k)
-	else:
-		s.lean = lean
-		s.bh = bh
-		s.have_input = true
-	s.conf = conf
+	# rawx здесь — высота тела, поэтому её нейтраль лежит в nx (а не в ny, как в старом коде).
+	var bh_neutral: float = s.nx if s.have_neutral and s.nx > 0.01 else bh
+	_feed(s, bh, lean, RANGE_PROX * bh_neutral, RANGE_LEAN, p.feet_confidence, dt)
 
 
 func _dz(v: float) -> float:
@@ -647,16 +855,15 @@ func _side_base(s: Paddle) -> Vector2:
 
 func _side_target(s: Paddle) -> Vector2:
 	var base := _side_base(s)
-	if not s.have_neutral or not s.have_input or s.bh_neutral <= 0.01:
+	if not s.have_neutral or not s.have_input:
 		return base
 	var b := _side_bounds(s)
-	# ось 1: наклон корпуса влево/вправо (в долях роста, ноль — калибровка)
-	var lat := _dz(clampf((s.lean - s.lean_neutral) / RANGE_LEAN, -1.0, 1.0))
-	# ось 2: шаг к камере/от камеры по изменению body_height
-	var dep := _dz(clampf((s.bh / s.bh_neutral - 1.0) / RANGE_PROX, -1.0, 1.0))
+	# ax — вперёд/назад (X стола), ay — вверх/вниз (Y стола).
+	# Лицом и наклоном головы управляем «как курсором»: вправо по экрану = вправо.
+	var sx := s.dir if input_mode == "lean" else 1.0
 	var t := base
-	t.y += lat * (TABLE.size.y * 0.5 - PAD_R - 8.0)
-	t.x += (dep * (b.size.x * 0.5 - 4.0) + s.push * PUSH_DIST) * s.dir
+	t.x += s.ax * sx * (b.size.x * 0.5 - 4.0) + s.push * PUSH_DIST * s.dir
+	t.y += s.ay * (TABLE.size.y * 0.5 - PAD_R - 8.0)
 	return Vector2(clampf(t.x, b.position.x, b.end.x), clampf(t.y, b.position.y, b.end.y))
 
 
@@ -1041,11 +1248,12 @@ func _draw_hud() -> void:
 	draw_rect(pr, Color(C_LINE.r, C_LINE.g, C_LINE.b, 0.6), false, 2.0)
 	# подсказки
 	if demo:
-		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт", Vector2(960, 1010), 24, C_DIM)
+		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт,  1/2/3 — режим ввода", Vector2(960, 1010), 24, C_DIM)
 	else:
-		_text("Голова влево-вправо — ракетка вверх-вниз  ·  присед/выпрямление — ракетка вперёд-назад", Vector2(960, 1010), 24, C_DIM)
-		_text("Во время отсчёта стойте ровно: калибруется нейтральное положение корпуса", Vector2(960, 1044), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
-	_draw_input_bars()
+		_text(_hint_line(), Vector2(960, 1010), 24, C_DIM)
+		_text("в отсчёт стойте ровно, смотрите в камеру — снимается нейтраль", Vector2(960, 1044), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+	_draw_input_sticks()
+	_draw_debug_panel()
 	var st: Dictionary = bridge.tracking_stats()
 	var lat: Dictionary = st.get("latency_ms", {})
 	var jit: Dictionary = st.get("jitter_ms", {})
@@ -1056,25 +1264,55 @@ func _draw_hud() -> void:
 			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
 
 
-func _draw_input_bars() -> void:
-	# Тонкие вертикальные полосы: насколько наклонён корпус и не деградировал ли вход.
+func _hint_line() -> String:
+	match input_mode:
+		"tilt":
+			return "Наклон головы набок — ракетка вверх/вниз · поворот головы — вперёд/назад · прыжок — толчок"
+		"lean":
+			return "Наклон корпуса — ракетка вверх/вниз · шаг к камере — вперёд/назад · прыжок — толчок"
+		_:
+			return "Лицо — курсор в своей половине: двигайте лицом вверх/вниз и влево/вправо · прыжок — толчок"
+
+
+func _draw_input_sticks() -> void:
+	# Квадрат на каждого игрока: точка = текущее положение входа по двум осям.
 	var i := 0
 	for s in sides:
-		var x := 250.0 if i == 0 else 1670.0
-		var top := 300.0
-		var h := 240.0
+		var origin := Vector2(250.0 if i == 0 else 1670.0, 360.0)
+		var half := 38.0
 		var col: Color = s.team_color
 		if s.using_fallback:
 			col = Color(1.0, 1.0, 1.0, 0.55)   # вход по рамке, а не по позе
-		draw_rect(Rect2(x - 4.0, top, 8.0, h), Color(0.0, 0.0, 0.0, 0.4))
-		var v := 0.0
-		if s.have_neutral and s.have_input:
-			v = clampf((s.lean - s.lean_neutral) / RANGE_LEAN, -1.0, 1.0)
-		var cy := top + h * 0.5 + v * h * 0.5
-		draw_rect(Rect2(x - 7.0, cy - 7.0, 14.0, 14.0), col)
-		draw_line(Vector2(x - 12.0, top + h * 0.5), Vector2(x + 12.0, top + h * 0.5),
-			Color(col.r, col.g, col.b, 0.3), 1.0)
+		var box := Rect2(origin - Vector2(half, half), Vector2(half, half) * 2.0)
+		draw_rect(box, Color(0.0, 0.0, 0.0, 0.35))
+		draw_rect(box, Color(col.r, col.g, col.b, 0.35), false, 2.0)
+		draw_line(origin - Vector2(half, 0.0), origin + Vector2(half, 0.0),
+			Color(col.r, col.g, col.b, 0.18), 1.0)
+		draw_line(origin - Vector2(0.0, half), origin + Vector2(0.0, half),
+			Color(col.r, col.g, col.b, 0.18), 1.0)
+		draw_circle(origin + Vector2(s.ax, s.ay) * half, 7.0, col)
 		i += 1
+	_text("вход: %s · усиление %.1f%s" % [input_mode, gain,
+		" · фолбэк по рамке" if _any_fallback() else ""], Vector2(960, 944), 20,
+		Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+
+
+func _any_fallback() -> bool:
+	for s in sides:
+		if s.using_fallback:
+			return true
+	return false
+
+
+func _draw_debug_panel() -> void:
+	if not debug_ui:
+		return
+	var y := 860.0
+	for s in sides:
+		_text("slot %d: raw=(%+.3f, %+.3f) нейтраль=(%+.3f, %+.3f) оси=(%+.2f, %+.2f) conf=%.2f" % [
+			s.slot, s.rawx, s.rawy, s.nx, s.ny, s.ax, s.ay, s.conf], Vector2(960, y), 18,
+			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.75))
+		y += 22.0
 
 
 func _draw_message() -> void:

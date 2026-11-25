@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Автопроверки Neon Air Hockey (Godot AR API v1).
+"""Автопроверки Neon Air Hockey (Godot AR API v2, 15 сценариев).
 
 Запускает игру с эмулятором трекинга и проверяет ключевые сценарии из
-приёмочного списка. Нужен Godot 4.5.1 (подойдёт и редакторская сборка).
+приёмочного списка: жизненный цикл треков, паузы, жесты, три режима ввода
+и запись трассы. Нужен Godot 4.5.1 (подойдёт и редакторская сборка).
 
   python3 tools/run_checks.py --godot /путь/к/godot
   python3 tools/run_checks.py --godot godot --only protocol
@@ -11,8 +12,10 @@
 Код возврата 0 — все проверки прошли.
 """
 import argparse
+import os
 import re
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -55,13 +58,14 @@ class Runner:
         return False
 
     def start_mock(self, extra):
+        mark = len(self.lines)   # порт ищем только в выводе ЭТОГО эмулятора
         mock = subprocess.Popen(
             [sys.executable, "-u", "tools/mock_tracker.py"] + extra,
             cwd=GAME_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         threading.Thread(target=self._pump, args=(mock.stdout,), daemon=True).start()
         port = None
         for _ in range(200):
-            m = re.search(r"--port=(\d+)", self.text())
+            m = re.search(r"--port=(\d+)", "\n".join(self.lines[mark:]))
             if m:
                 port = m.group(1)
                 break
@@ -122,7 +126,7 @@ def check_physics(r):
 
 @check("protocol")
 def check_protocol(r):
-    """v2: 2 игрока, калибровка, наклон корпуса двигает ракетку, жесты и толчок."""
+    """v2: 2 игрока, калибровка, лицо двигает ракетку, жесты и толчок."""
     mock, port = r.start_mock(["--duration", "45"])
     try:
         code = r.run_game(["--port=" + port, "--selftest=protocol"], timeout=45)
@@ -133,6 +137,52 @@ def check_protocol(r):
         detail = ", ".join(re.findall(r"ST protocol: (.+)", r.text()))
         return True, detail
     return False, "нет PASS (код %s)" % code
+
+
+@check("control")
+def check_control(r):
+    """Три режима ввода (лицо/голова/корпус): обе оси двигают ракетку, трасса пишется."""
+    details = []
+    for mode in ("face", "tilt", "lean"):
+        mock, port = r.start_mock(["--duration", "20"])
+        mark = len(r.lines)
+        rec = os.path.join(tempfile.gettempdir(), "wlx_rec_%s.jsonl" % mode)
+        if os.path.exists(rec):
+            os.remove(rec)
+        try:
+            game = r.start_game(["--port=" + port, "--selftest=log",
+                                 "--control=" + mode, "--record=" + rec])
+            time.sleep(9)
+            r.stop(game)
+        finally:
+            r.stop(mock)
+        text = "\n".join(r.lines[mark:])
+        if re.search(r"SCRIPT ERROR", text):
+            return False, "%s: ошибка скрипта" % mode
+        if "PLAY" not in re.findall(r"^STATE (\w+)", text, re.M):
+            return False, "%s: до PLAY не дошло" % mode
+        slots = {}
+        for m in re.finditer(r"INPUT slot=(\d) mode=(\w+).*?range=\([^)]*\) ax=([-+][\d.]+) ay=([-+][\d.]+)",
+                             text):
+            slot, seen, ax, ay = int(m.group(1)), m.group(2), float(m.group(3)), float(m.group(4))
+            if seen != mode:
+                return False, "%s: в логе режим %s" % (mode, seen)
+            acc = slots.setdefault(slot, [0.0, 0.0])
+            acc[0] = max(acc[0], abs(ax))
+            acc[1] = max(acc[1], abs(ay))
+        if len(slots) != 2:
+            return False, "%s: ввод только у %d игрока(ов)" % (mode, len(slots))
+        for slot, acc in slots.items():
+            if acc[0] < 0.3 or acc[1] < 0.3:
+                return False, "%s: игрок %d, оси слабые (%.2f, %.2f)" % (mode, slot + 1, acc[0], acc[1])
+        frames = 0
+        if os.path.exists(rec):
+            with open(rec, encoding="utf-8") as fh:
+                frames = sum(1 for line in fh if line.strip())
+        if frames < 20:
+            return False, "%s: записано кадров %d" % (mode, frames)
+        details.append("%s %.0f/%.0f кадров %d" % (mode, slots[0][0] * 100, slots[0][1] * 100, frames))
+    return True, "; ".join(details)
 
 
 @check("leave")
@@ -264,7 +314,9 @@ def check_reacquire(r):
 @check("nohead")
 def check_nohead(r):
     """Пропала точка головы: без падений, через 2 с пауза с понятной причиной."""
-    mock, port = r.start_mock(["--lose-head", "5", "--gone-for", "3", "--duration", "30"])
+    # Голова пропадает насовсем: пауза не должна зависеть от того, успел ли
+    # забиться гол и сбросить окно PLAY.
+    mock, port = r.start_mock(["--lose-head", "4", "--gone-for", "40", "--duration", "45"])
     try:
         game = r.start_game(["--port=" + port, "--selftest=log"])
         time.sleep(10)
