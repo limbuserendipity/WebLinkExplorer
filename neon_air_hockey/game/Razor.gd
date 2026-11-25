@@ -9,9 +9,10 @@ const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
 const CamView := preload("res://core/CamView.gd")
 const InputHint := preload("res://core/InputHint.gd")
+const Lay := preload("res://core/Layout.gd")
 
 const HORIZON := 470.0           # линия горизонта, px
-const BOTTOM := 1000.0           # ближний край дороги, px
+const BOTTOM := 900.0            # ближний край дороги: низ сцены по сетке
 const VP_X := 960.0              # точка схода
 const Z0 := 8.0
 const PX_UNIT := 230.0           # пикселей на единицу дороги у ближнего края
@@ -27,9 +28,7 @@ const MAX_HUMANS := 6
 const STALE := 0.5
 const MENU_SCENE := "res://ui/Menu.tscn"
 
-const CAM_RECT := Rect2(24.0, 24.0, 320.0, 180.0)
-const HINT_RECT := Rect2(24.0, 222.0, 424.0, 236.0)
-const BOARD_RECT := Rect2(1540.0, 24.0, 356.0, 262.0)
+var BOARD_RECT: Rect2 = Lay.RAZOR_BOARD
 
 enum St { WAIT, READY, RUN, RESULT, OVER }
 
@@ -86,9 +85,8 @@ var arrows := {"left": false, "right": false, "up": false, "down": false}
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
 	cam_view = CamView.new()
-	cam_view.setup(CAM_RECT)
-	cam_view.subtitle = "фильтр: неон"
 	add_child(cam_view)
+	cam_view.setup(Lay.RAZOR_CAM)
 	var has_port := false
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--port="):
@@ -449,7 +447,9 @@ func _proj(zd: float, wx: float) -> Vector2:
 
 
 func _zd_of(dz: float) -> float:
-	return 5.0 + 2.2 * sqrt(maxf(dz, 0.0))
+	# Сжатие глубины: отставание в метрах → экранная глубина. База 2 держит
+	# последнюю машину близко к нижнему краю дороги, лидер уходит к горизонту.
+	return 2.0 + 2.2 * sqrt(maxf(dz, 0.0))
 
 
 func _car_zd(c: Car) -> float:
@@ -458,6 +458,7 @@ func _car_zd(c: Car) -> float:
 
 
 func _draw() -> void:
+	Neo.grid_bg(self, Vector2(Lay.W, Lay.H))
 	if shake > 0.0:
 		var tm := Time.get_ticks_msec() * 0.001
 		draw_set_transform(Vector2(sin(tm * 77.0) * shake * 6.0, cos(tm * 67.0) * shake * 5.0),
@@ -472,17 +473,21 @@ func _draw() -> void:
 
 
 func _draw_sky() -> void:
+	# Небо — только сцена (между шапкой и подвалом), шапка остаётся сеткой.
 	var bands := 18
 	var top := Color(0.03, 0.0, 0.10)
 	var low := Color(0.24, 0.03, 0.34)
+	var sky_top := Lay.STAGE_Y
+	var span := HORIZON - sky_top
 	for i in bands:
 		var k := float(i) / float(bands - 1)
 		var c := top.lerp(low, k * k)
-		draw_rect(Rect2(0.0, HORIZON * k, 1920.0, HORIZON / float(bands) + 1.0), c)
+		draw_rect(Rect2(0.0, sky_top + span * float(i) / float(bands), Lay.W,
+			span / float(bands) + 1.0), c)
 	# звёзды
 	for i in 70:
 		var sx := fmod(float(i) * 271.3, 1900.0) + 10.0
-		var sy := fmod(float(i) * 97.7, 330.0) + 12.0
+		var sy := sky_top + fmod(float(i) * 97.7, span - 30.0) + 8.0
 		var tw := 0.35 + 0.35 * sin(Time.get_ticks_msec() * 0.001 * 2.0 + float(i))
 		draw_circle(Vector2(sx, sy), 1.4, Color(0.85, 0.9, 1.0, 0.25 + 0.4 * tw))
 	# солнце
@@ -512,7 +517,7 @@ func _draw_sky() -> void:
 
 
 func _draw_road() -> void:
-	var near_zd := 0.55
+	var near_zd := 0.15
 	var far_zd := 420.0
 	var nl := _proj(near_zd, -ROAD_HALF)
 	var nr := _proj(near_zd, ROAD_HALF)
@@ -662,90 +667,92 @@ func _update_sparks(dt: float) -> void:
 
 
 func _draw_hud() -> void:
-	Neo.text(self, "РАЗОРТРОН 2000", Vector2(960, 96), 56, Neo.TEXT)
-	var lead := _lead_dist()
 	var me := _best_human()
-	Neo.text(self, "до финиша %d м · %.0f км/ч" % [
-		maxi(int(race_m - (me.dist if me != null else lead)), 0),
-		(me.v if me != null else 0.0) * 3.6], Vector2(960, 146), 24, Neo.DIM)
-	# полоса прогресса гонки
-	var bar := Rect2(560.0, 172.0, 800.0, 10.0)
+	var left := maxi(int(race_m - (me.dist if me != null else _lead_dist())), 0)
+	Lay.header(self, "РАЗОРТРОН 2000", "трасса %d м · трафик тормозит" % int(race_m),
+		"до финиша %d м" % left, "%.0f км/ч" % ((me.v if me != null else 0.0) * 3.6))
+	_draw_progress()
+	_draw_board()
+	_draw_footer()
+	_draw_overlay()
+	if debug_ui:
+		_draw_debug()
+
+
+func _draw_progress() -> void:
+	var bar := Lay.RAZOR_BAR
 	draw_rect(bar, Color(1.0, 1.0, 1.0, 0.10))
 	for c in cars:
 		var k := clampf(c.dist / race_m, 0.0, 1.0)
-		draw_circle(Vector2(bar.position.x + bar.size.x * k, bar.position.y + 5.0),
-			6.0 if c.human else 4.0, c.color)
-		draw_line(Vector2(bar.position.x + bar.size.x * k, bar.position.y - 1.0),
-			Vector2(bar.position.x + bar.size.x * k, bar.position.y + 11.0), c.color, 1.0)
-	_draw_board()
-	_draw_hints()
-	_draw_overlay()
+		var x := bar.position.x + bar.size.x * k
+		draw_line(Vector2(x, bar.position.y - 3.0), Vector2(x, bar.end.y + 3.0), c.color, 2.0)
+		draw_circle(Vector2(x, bar.get_center().y), 6.0 if c.human else 4.0, c.color)
 
 
 func _draw_board() -> void:
-	Neo.box(self, BOARD_RECT, Neo.with_alpha(Neo.LINE, 0.5), 1.5, Color(0.02, 0.0, 0.08, 0.72))
-	Neo.text_left(self, "ГОНКА", BOARD_RECT.position + Vector2(16, 30), 20,
-		Neo.with_alpha(Neo.DIM, 0.9))
+	var r := BOARD_RECT
+	Lay.panel(self, r, "гонка")
+	var b := Lay.body(r)
 	var order := _places()
-	var y := BOARD_RECT.position.y + 44.0
+	var row_h := 42.0
+	var y := b.position.y + 6.0
 	for c in order:
-		var r := Rect2(BOARD_RECT.position.x + 10.0, y, BOARD_RECT.size.x - 20.0, 30.0)
+		var rr := Rect2(b.position.x - 6.0, y, b.size.x + 12.0, row_h - 4.0)
 		if c.human:
-			draw_rect(r, Neo.with_alpha(c.color, 0.10))
-		Neo.text_left(self, "%d" % c.place, r.position + Vector2(8, 21), 18, c.color)
-		draw_circle(r.position + Vector2(40, 15), 6.0, c.color)
-		Neo.text_left(self, c.title, r.position + Vector2(54, 21), 18,
+			draw_rect(rr, Neo.with_alpha(c.color, 0.10))
+		Neo.text_left(self, str(c.place), Vector2(rr.position.x + 8.0, y + 22.0), Lay.T_SMALL,
+			c.color)
+		draw_circle(Vector2(rr.position.x + 34.0, y + 16.0), 6.0, c.color)
+		Neo.text_left(self, c.title, Vector2(rr.position.x + 48.0, y + 22.0), Lay.T_SMALL,
 			Neo.TEXT if c.human else Neo.DIM)
-		Neo.text_left(self, "%d м" % int(c.dist), r.position + Vector2(r.size.x - 76, 21), 16,
+		var m := "%d м" % int(c.dist)
+		var font := ThemeDB.fallback_font
+		var w := 0.0
+		if font != null:
+			w = font.get_string_size(m, HORIZONTAL_ALIGNMENT_LEFT, -1, Lay.T_TINY).x
+		Neo.text_left(self, m, Vector2(rr.end.x - w - 8.0, y + 21.0), Lay.T_TINY,
 			Neo.with_alpha(Neo.DIM, 0.9))
-		y += 34.0
-	if y + 20.0 < BOARD_RECT.end.y:
-		Neo.text_left(self, "наклон головы — руль, вперёд — газ", BOARD_RECT.position
-			+ Vector2(16, BOARD_RECT.size.y - 12.0), 14, Neo.with_alpha(Neo.DIM, 0.6))
+		y += row_h
 
 
-func _draw_hints() -> void:
+func _draw_footer() -> void:
+	InputHint.draw(self, Lay.RAZOR_HINT, _active_src(), Time.get_ticks_msec() * 0.001)
+	var x := Lay.RAZOR_HINT.end.x + 32.0
 	var h := "наклон головы влево/вправо — руль · голова вперёд — газ · назад — тормоз"
 	if demo:
-		h = "стрелки ←/→ — руль · ↑ — газ · ↓ — тормоз · пробел — старт"
-	Neo.text(self, h, Vector2(1150, 1032), 22, Neo.DIM)
-	Neo.text(self, "1..5 — режим ввода · ESC — меню", Vector2(1150, 1064), 20,
-		Neo.with_alpha(Neo.DIM, 0.75))
-	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001)
+		h = "демо: ←/→ — руль · ↑ — газ · ↓ — тормоз · пробел — старт"
+	Neo.text_left(self, h, Vector2(x, Lay.FOOT_Y + 36.0), Lay.T_BODY, Neo.DIM)
+	Neo.text_left(self, "1..5 — режим ввода · ESC — меню", Vector2(x, Lay.FOOT_Y + 70.0),
+		Lay.T_SMALL, Neo.with_alpha(Neo.DIM, 0.65))
 
 
 func _draw_overlay() -> void:
+	# Центр дороги: сцена 200…900, горизонт на 470.
+	var cx := VP_X
+	var cy := (HORIZON + BOTTOM) * 0.5
 	match state:
 		St.WAIT:
-			Neo.text(self, "ВСТАНЬТЕ ПЕРЕД КАМЕРОЙ", Vector2(960, 600), 44, Neo.TEXT)
-			Neo.text(self, "от 1 до 6 игроков · гонка до финиша", Vector2(960, 652), 26, Neo.DIM)
+			Neo.text(self, "ВСТАНЬТЕ ПЕРЕД КАМЕРОЙ", Vector2(cx, cy - 20.0), Lay.T_H1, Neo.TEXT)
+			Neo.text(self, "от 1 до 6 игроков · гонка до финиша", Vector2(cx, cy + 26.0), Lay.T_H2,
+				Neo.DIM)
 		St.READY:
 			var k := ceili(2.6 - state_t)
-			Neo.text(self, str(maxi(k, 1)), Vector2(960, 620), 140, Neo.PUCK)
-			Neo.text(self, "руки на руле", Vector2(960, 690), 26, Neo.DIM)
+			Neo.text(self, str(maxi(k, 1)), Vector2(cx, cy + 40.0), 140, Neo.PUCK)
+			Neo.text(self, "голова — руль, вперёд — газ", Vector2(cx, cy + 100.0), Lay.T_H2,
+				Neo.DIM)
 		St.RESULT:
 			var who := "никто" if winner < 0 else cars[winner].title
 			var col: Color = Neo.TEXT if winner < 0 else cars[winner].color
-			Neo.text(self, "ФИНИШ · %s" % who, Vector2(960, 600), 60, col)
+			Neo.text(self, "ФИНИШ · %s" % who, Vector2(cx, cy - 30.0), Lay.T_DISPLAY, col)
 			var order := _places()
 			var line := ""
 			for i in mini(order.size(), 6):
-				line += "%d) %s  " % [order[i].place, order[i].title]
-			Neo.text(self, line, Vector2(960, 660), 24, Neo.DIM)
-			Neo.text(self, "возвращаемся в меню…", Vector2(960, 700), 22,
+				line += "%d) %s   " % [order[i].place, order[i].title]
+			Neo.text(self, line, Vector2(cx, cy + 20.0), Lay.T_BODY, Neo.DIM)
+			Neo.text(self, "возвращаемся в меню…", Vector2(cx, cy + 56.0), Lay.T_SMALL,
 				Neo.with_alpha(Neo.DIM, 0.7))
 		St.OVER:
-			Neo.text(self, "ещё заезд?", Vector2(960, 620), 40, Neo.OK)
-	if frozen and state == St.RUN:
-		Neo.text(self, "ПАУЗА: ждём игроков в кадре", Vector2(960, 560), 40, Neo.WARN)
-	if debug_ui:
-		var y := 900.0
-		for c in cars:
-			if c.human:
-				Neo.text_left(self, "%s ax=%+.2f ay=%+.2f %s v=%.0f" % [
-					c.title, c.inp.ax, c.inp.ay, c.inp.mode_label(), c.v],
-					Vector2(24, y), 16, Neo.DIM)
-				y += 20.0
+			Neo.text(self, "ещё заезд?", Vector2(cx, cy), Lay.T_H1, Neo.OK)
 
 
 ## Машина первого живого игрока (для подписи скорости).
@@ -754,6 +761,21 @@ func _best_human() -> Car:
 		if c.human:
 			return c
 	return null
+
+
+func _draw_debug() -> void:
+	# Отладочная панель (--debug): числа ввода каждой машины, слева поверх дороги.
+	var rows := maxi(cars.size(), 1)
+	var h := 24.0 * float(rows) + 16.0
+	var r := Rect2(Lay.M + 8.0, Lay.STAGE_BOTTOM - h - 8.0, 640.0, h)
+	draw_rect(r, Color(0.0, 0.0, 0.0, 0.62))
+	draw_rect(r, Neo.with_alpha(Neo.LINE, 0.55), false, 1.0)
+	var y := r.position.y + 22.0
+	for c in cars:
+		Neo.text_left(self, "%s %s ax=%+.2f ay=%+.2f %s v=%.0f — %.0f м" % [
+			c.title, c.inp.mode_label(), c.inp.ax, c.inp.ay, c.inp.active, c.v, c.dist],
+			Vector2(r.position.x + 12.0, y), Lay.T_TINY, c.color if c.human else Neo.DIM)
+		y += 24.0
 
 
 func _active_src() -> String:

@@ -21,12 +21,11 @@ extends Node2D
 ##                          движение ракетки за головой, сигнал gesture).
 
 var win_score := 5                 # матч до N голов (--win-score=N)
-const TABLE := Rect2(210.0, 260.0, 1500.0, 700.0)
-const CAM_RECT := Rect2(810.0, 22.0, 300.0, 169.0)   # кадр с камеры
-const HINT_RECT := Rect2(24.0, 968.0, 664.0, 104.0)  # подсказка лицо/рука
-const GOAL_HALF := 130.0          # половина высоты створа ворот
-const PUCK_R := 24.0
-const PAD_R := 46.0
+const Lay := preload("res://core/Layout.gd")   # единая сетка и типографика
+const TABLE := Rect2(48.0, 200.0, 1500.0, 700.0)      # стол по сетке
+const GOAL_HALF := 140.0          # половина высоты створа ворот
+const PUCK_R := 26.0
+const PAD_R := 52.0
 const STEP := 1.0 / 120.0         # подшаг физики (против туннелирования)
 const PUCK_MAX_SPEED := 2400.0
 const PUCK_FRICTION := 0.10       # экспоненциальное затухание в секунду
@@ -189,8 +188,8 @@ var cam_view = null
 func _ready() -> void:
 	bridge = get_node("/root/GameDirector")
 	cam_view = CamView.new()
-	cam_view.setup(CAM_RECT)
 	add_child(cam_view)
+	cam_view.setup(Lay.AIR_CAM)
 	bridge.gesture.connect(_on_gesture)
 	bridge.gesture_phase.connect(_on_gesture_phase)
 	rng.randomize()
@@ -1207,35 +1206,60 @@ func _draw_sparks() -> void:
 
 
 func _draw_hud() -> void:
-	_digit(Vector2(350, 42), Vector2(86, 124), clampi(scores[0], 0, 9), C_LEFT)
-	_digit(Vector2(1484, 42), Vector2(86, 124), clampi(scores[1], 0, 9), C_RIGHT)
-	_text("ИГРОК 1", Vector2(393, 205), 24, C_LEFT)
-	_text("ИГРОК 2", Vector2(1527, 205), 24, C_RIGHT)
-	_text("МАТЧ ДО %d" % win_score, Vector2(960, 228), 22, C_DIM)
-	# кадр с вебкамеры (фильтр + рамки игроков) — узел CamView, см. _update_cam
-	# подсказки
-	if demo:
-		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт,  1..5 — режим ввода", Vector2(1240, 1000), 24, C_DIM)
-	else:
-		_text(_hint_line(), Vector2(1240, 1000), 24, C_DIM)
-		_text("в отсчёт стойте ровно, смотрите в камеру — снимается нейтраль", Vector2(1240, 1032), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
-	# визуальная подсказка: близко — лицом, далеко — рукой
-	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001, true)
-	_draw_input_sticks()
+	Lay.header(self, "АЭРОХОККЕЙ", "матч до %d голов" % win_score,
+		"%d : %d" % [clampi(scores[0], 0, 99), clampi(scores[1], 0, 99)],
+		"игрок 1 · игрок 2", C_PUCK)
+	_draw_status()
+	_draw_footer()
 	_draw_debug_panel()
+	# визуальная подсказка: близко — лицом, далеко — рукой
+	InputHint.draw(self, Lay.AIR_HINT, _active_src(), Time.get_ticks_msec() * 0.001)
+
+
+func _age_text() -> String:
+	var age: float = bridge.tracking_age()
+	return "нет данных" if is_inf(age) else "%.0f мс" % (age * 1000.0)
+
+
+func _draw_status() -> void:
+	var r := Lay.AIR_STATUS
+	Lay.panel(self, r, "состояние")
+	var b := Lay.body(r)
+	var rows := [
+		["режим", input_mode],
+		["ввод", "рука" if _active_src() == "hand" else "лицо"],
+		["данные", _age_text()],
+	]
+	var y := b.position.y + 12.0
+	for row in rows:
+		Neo.text_left(self, row[0], Vector2(b.position.x, y), Lay.T_TINY,
+			Neo.with_alpha(C_DIM, 0.8))
+		Neo.text_left(self, row[1], Vector2(b.position.x + 92.0, y), Lay.T_TINY, C_TEXT)
+		y += 26.0
+
+
+func _draw_footer() -> void:
+	for i in sides.size():
+		_stick(Rect2(Lay.M + float(i) * 88.0, Lay.FOOT_Y + 4.0, 76.0, 76.0), sides[i])
+	var tx := Lay.M + 200.0
+	var line1 := _hint_line()
+	if demo:
+		line1 = "ДЕМО БЕЗ ТРЕКИНГА: P1 — WASD · P2 — стрелки · Пробел — старт"
+	Neo.text_left(self, line1, Vector2(tx, Lay.FOOT_Y + 36.0), Lay.T_BODY, C_DIM)
+	Neo.text_left(self, "1..5 — режим ввода · ESC — меню · в отсчёт стойте ровно — снимается нейтраль",
+		Vector2(tx, Lay.FOOT_Y + 70.0), Lay.T_SMALL, Neo.with_alpha(C_DIM, 0.65))
+	# метрики трекера — справа в подвале
 	var st: Dictionary = bridge.tracking_stats()
 	var lat: Dictionary = st.get("latency_ms", {})
-	var jit: Dictionary = st.get("jitter_ms", {})
-	var age: float = bridge.tracking_age()
-	var age_txt := "нет данных" if is_inf(age) else "данные %.0f мс" % (age * 1000.0)
+	var info := "кадр %dx%d" % [bridge.frame_size.x, bridge.frame_size.y]
 	if not lat.is_empty():
-		_text("данные %s · задержка входа p95 %.0f мс · джиттер %.1f мс · кадр %dx%d" % [
-			age_txt, float(lat.get("p95", 0.0)), float(jit.get("p95", 0.0)),
-			bridge.frame_size.x, bridge.frame_size.y], Vector2(960, 972), 20,
-			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
-	elif not is_inf(age):
-		_text("данные %s · кадр %dx%d" % [age_txt, bridge.frame_size.x, bridge.frame_size.y],
-			Vector2(960, 972), 20, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
+		info = "задержка входа p95 %.0f мс · %s" % [float(lat.get("p95", 0.0)), info]
+	var font := ThemeDB.fallback_font
+	var w := 0.0
+	if font != null:
+		w = font.get_string_size(info, HORIZONTAL_ALIGNMENT_LEFT, -1, Lay.T_TINY).x
+	Neo.text_left(self, info, Vector2(Lay.W - Lay.M - w, Lay.FOOT_Y + 70.0), Lay.T_TINY,
+		Neo.with_alpha(C_DIM, 0.6))
 
 
 func _hint_line() -> String:
@@ -1248,27 +1272,20 @@ func _hint_line() -> String:
 			return "Лицо — курсор в своей половине: двигайте лицом вверх/вниз и влево/вправо · прыжок — толчок"
 
 
-func _draw_input_sticks() -> void:
-	# Квадрат на каждого игрока: точка = текущее положение входа по двум осям.
-	var i := 0
-	for s in sides:
-		var origin := Vector2(250.0 if i == 0 else 1670.0, 360.0)
-		var half := 38.0
-		var col: Color = s.team_color
-		if s.using_fallback:
-			col = Color(1.0, 1.0, 1.0, 0.55)   # вход по рамке, а не по позе
-		var box := Rect2(origin - Vector2(half, half), Vector2(half, half) * 2.0)
-		draw_rect(box, Color(0.0, 0.0, 0.0, 0.35))
-		draw_rect(box, Color(col.r, col.g, col.b, 0.35), false, 2.0)
-		draw_line(origin - Vector2(half, 0.0), origin + Vector2(half, 0.0),
-			Color(col.r, col.g, col.b, 0.18), 1.0)
-		draw_line(origin - Vector2(0.0, half), origin + Vector2(0.0, half),
-			Color(col.r, col.g, col.b, 0.18), 1.0)
-		draw_circle(origin + Vector2(s.ax, s.ay) * half, 7.0, col)
-		i += 1
-	_text("вход: %s · усиление %.1f%s" % [input_mode, gain,
-		" · фолбэк по рамке" if _any_fallback() else ""], Vector2(960, 944), 20,
-		Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+func _stick(r: Rect2, s) -> void:
+	# Квадрат ввода игрока: точка = текущее (ax, ay).
+	var origin := r.get_center()
+	var half := r.size.x * 0.5 - 6.0
+	var col: Color = s.team_color
+	if s.using_fallback:
+		col = Color(1.0, 1.0, 1.0, 0.55)   # вход по рамке, а не по позе
+	draw_rect(r, Color(0.0, 0.0, 0.0, 0.35))
+	draw_rect(r, Color(col.r, col.g, col.b, 0.35), false, 2.0)
+	draw_line(origin - Vector2(half, 0.0), origin + Vector2(half, 0.0),
+		Color(col.r, col.g, col.b, 0.18), 1.0)
+	draw_line(origin - Vector2(0.0, half), origin + Vector2(0.0, half),
+		Color(col.r, col.g, col.b, 0.18), 1.0)
+	draw_circle(origin + Vector2(s.ax, s.ay) * half, 7.0, col)
 
 
 func _any_fallback() -> bool:
@@ -1281,46 +1298,46 @@ func _any_fallback() -> bool:
 func _draw_debug_panel() -> void:
 	if not debug_ui:
 		return
-	var y := 860.0
+	var y := Lay.FOOT_Y + 106.0
 	for s in sides:
-		_text("slot %d: raw=(%+.3f, %+.3f) нейтраль=(%+.3f, %+.3f) оси=(%+.2f, %+.2f) conf=%.2f" % [
-			s.slot, s.rawx, s.rawy, s.nx, s.ny, s.ax, s.ay, s.conf], Vector2(960, y), 18,
+		Neo.text(self, "slot %d: raw=(%+.3f, %+.3f) нейтраль=(%+.3f, %+.3f) оси=(%+.2f, %+.2f) conf=%.2f" % [
+			s.slot, s.rawx, s.rawy, s.nx, s.ny, s.ax, s.ay, s.conf], Vector2(960, y), Lay.T_TINY,
 			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.75))
-		y += 22.0
+		y += 20.0
 
 
 func _draw_message() -> void:
 	var mid := Vector2(TABLE.position.x + TABLE.size.x * 0.5, TABLE.position.y + TABLE.size.y * 0.5)
 	match state:
 		St.WAITING:
-			_text("ВСТАНЬТЕ ВДВОЁМ ПЕРЕД КАМЕРОЙ", mid + Vector2(0, -40), 44, C_TEXT)
-			_text("кто левее в кадре — игрок 1 (голубой), кто правее — игрок 2 (розовый)", mid + Vector2(0, 10), 26, C_DIM)
+			_text("ВСТАНЬТЕ ВДВОЁМ ПЕРЕД КАМЕРОЙ", mid + Vector2(0, -40), Lay.T_H1, C_TEXT)
+			_text("кто левее в кадре — игрок 1 (голубой), кто правее — игрок 2 (розовый)", mid + Vector2(0, 10), Lay.T_H2, C_DIM)
 			var tent: Array = bridge.tentative_players()
 			if not tent.is_empty():
-				_text("человека видно, подтверждаю трек…", mid + Vector2(0, 52), 26, C_TENTATIVE)
+				_text("человека видно, подтверждаю трек…", mid + Vector2(0, 52), Lay.T_H2, C_TENTATIVE)
 			if demo:
-				_text("или нажмите Пробел для демо-матча на клавиатуре", mid + Vector2(0, 84), 26, C_DIM)
+				_text("или нажмите Пробел для демо-матча на клавиатуре", mid + Vector2(0, 84), Lay.T_H2, C_DIM)
 		St.READY:
 			var c := clampi(ceili(ready_dur - state_t), 1, 9)
 			_digit(mid + Vector2(-35, -130), Vector2(70, 110), c, C_TEXT)
-			_text("ПРИГОТОВЬТЕСЬ", mid + Vector2(0, 30), 36, C_TEXT)
-			_text("стойте ровно, голова прямо — идёт калибровка", mid + Vector2(0, 72), 24, C_DIM)
+			_text("ПРИГОТОВЬТЕСЬ", mid + Vector2(0, 30), Lay.T_H1, C_TEXT)
+			_text("стойте ровно, голова прямо — идёт калибровка", mid + Vector2(0, 72), Lay.T_BODY, C_DIM)
 		St.GOAL:
 			var gc := C_LEFT if goal_side == 0 else C_RIGHT
 			_text("ГОЛ!", mid + Vector2(0, -20), 96, gc)
-			_text("Игрок %d забивает!" % (goal_side + 1), mid + Vector2(0, 50), 34, C_TEXT)
+			_text("Игрок %d забивает!" % (goal_side + 1), mid + Vector2(0, 50), Lay.T_H2, C_TEXT)
 		St.PAUSED:
-			_text("ПАУЗА", mid + Vector2(0, -50), 64, C_TEXT)
-			_text(pause_reason, mid + Vector2(0, 6), 30, C_DIM)
-			_text("ждём возвращения… %.0f" % maxf(pause_grace, 0.0), mid + Vector2(0, 48), 26, C_DIM)
+			_text("ПАУЗА", mid + Vector2(0, -50), Lay.T_DISPLAY, C_TEXT)
+			_text(pause_reason, mid + Vector2(0, 6), Lay.T_H2, C_DIM)
+			_text("ждём возвращения… %.0f" % maxf(pause_grace, 0.0), mid + Vector2(0, 48), Lay.T_H2, C_DIM)
 		St.OVER:
 			var winner := 0 if scores[0] > scores[1] else 1
 			var wc := C_LEFT if winner == 0 else C_RIGHT
-			_text("ИГРОК %d ПОБЕДИЛ!" % (winner + 1), mid + Vector2(0, -40), 64, wc)
-			_text("Счёт  %d : %d" % [scores[0], scores[1]], mid + Vector2(0, 16), 34, C_TEXT)
+			_text("ИГРОК %d ПОБЕДИЛ!" % (winner + 1), mid + Vector2(0, -40), Lay.T_DISPLAY, wc)
+			_text("Счёт  %d : %d" % [scores[0], scores[1]], mid + Vector2(0, 16), Lay.T_H2, C_TEXT)
 			if demo:
-				_text("Пробел — реванш", mid + Vector2(0, 60), 26, C_DIM)
+				_text("Пробел — реванш", mid + Vector2(0, 60), Lay.T_H2, C_DIM)
 			elif selftest != "":
-				_text("реванш через %.0f с" % maxf(8.0 - state_t, 0.0), mid + Vector2(0, 60), 26, C_DIM)
+				_text("реванш через %.0f с" % maxf(8.0 - state_t, 0.0), mid + Vector2(0, 60), Lay.T_H2, C_DIM)
 			else:
-				_text("через %.0f с вернёмся в меню" % maxf(8.0 - state_t, 0.0), mid + Vector2(0, 60), 26, C_DIM)
+				_text("через %.0f с вернёмся в меню" % maxf(8.0 - state_t, 0.0), mid + Vector2(0, 60), Lay.T_H2, C_DIM)

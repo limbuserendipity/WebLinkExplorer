@@ -249,6 +249,17 @@ def check_tron(r):
     return ok, (detail.group(1) if ok and detail else "раунд не закончился (код %s)" % code)
 
 
+@check("jump")
+def check_jump(r):
+    """«Неон-джамп»: упал — не выбываешь, возвращаешься сверху с минусом очков."""
+    code = r.run_game(["--selftest=jump"], timeout=45)
+    text = r.text()
+    ok = "SELFTEST JUMP PASS" in text
+    detail = re.search(r"SELFTEST JUMP PASS: (.+)", text)
+    return ok, (detail.group(1) if ok and detail
+                else "возврат после падения не сработал (код %s)" % code)
+
+
 @check("walk")
 def check_walk(r):
     """Отошёл и вернулся: вход не залипает и снова достаёт до стен."""
@@ -586,6 +597,30 @@ def check_razor6(r):
         return False, "машин не шесть: %s" % (m.group(0) if m else "нет строк RAZOR RACE")
     ok = "SELFTEST RAZOR PASS" in text
     return ok, ("6 машин, заезд доехал" if ok else "заезд не доехал до финиша")
+
+
+@check("grid")
+def check_grid(r):
+    """Единая сетка: панели в безопасной зоне, не пересекаются, кадры 16:9."""
+    r.run_game(["--selftest=grid"], timeout=40)
+    text = r.text()
+    if "SELFTEST GRID PASS" in text:
+        return True, "панели по сетке, кадры 16:9, кегли из шкалы"
+    bad = [ln.strip() for ln in text.splitlines() if "GRID:" in ln]
+    return False, "; ".join(bad[:3]) or "сетка не подтвердилась"
+
+
+@check("draw")
+def check_draw(r):
+    """Все экраны и все их состояния реально рисуются без ошибок скрипта."""
+    r.run_game(["--selftest=draw"], timeout=60)
+    text = r.text()
+    if "SCRIPT ERROR" in text:
+        lines = [ln.strip() for ln in text.splitlines() if "SCRIPT ERROR" in ln]
+        return False, lines[0][:160]
+    if "SELFTEST DRAW PASS" in text:
+        return True, "меню, трон, разортрон, аэрохоккей, неон-джамп — без ошибок"
+    return False, "прогон отрисовки не доехал"
 
 
 def main():

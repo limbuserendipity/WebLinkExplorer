@@ -8,10 +8,9 @@ const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
 const CamView := preload("res://core/CamView.gd")
 const InputHint := preload("res://core/InputHint.gd")
+const Lay := preload("res://core/Layout.gd")
 
-const ARENA := Rect2(40.0, 230.0, 1440.0, 640.0)   # поле занимает почти весь экран
-const CAM_RECT := Rect2(1500.0, 230.0, 400.0, 225.0)  # кадр с камеры
-const HINT_RECT := Rect2(1500.0, 472.0, 400.0, 236.0) # подсказка лицо/рука
+var ARENA: Rect2 = Lay.TRON_ARENA   # поле по единой сетке: 68×36 клеток
 const CELL := 20.0
 const TICK := 0.075              # шаг мотоцикла, с
 const WIN_ROUNDS := 3
@@ -75,7 +74,7 @@ var frame_px := Vector2(1920.0, 1080.0)
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
 	cam_view = CamView.new()
-	cam_view.setup(CAM_RECT)
+	cam_view.setup(Lay.TRON_CAM)
 	cam_view.subtitle = "фильтр: неон"
 	add_child(cam_view)
 	var has_port := false
@@ -104,12 +103,12 @@ func _ready() -> void:
 	arena_cells = Vector2i(int(ARENA.size.x / CELL), int(ARENA.size.y / CELL))
 	# Раскладка: поле занимает почти весь экран, правый столбец — камера и подсказка.
 	var frac := ARENA.get_area() / (1920.0 * 1080.0)
-	var side := (CAM_RECT.get_area() + HINT_RECT.get_area()) / (1920.0 * 1080.0)
-	var clean: bool = not ARENA.intersects(CAM_RECT) and not ARENA.intersects(HINT_RECT) \
-		and CAM_RECT.end.x <= 1920.0 and HINT_RECT.end.y <= 1080.0
+	var side := (Lay.TRON_CAM.get_area() + Lay.TRON_HINT.get_area()) / (1920.0 * 1080.0)
+	var clean: bool = not ARENA.intersects(Lay.TRON_CAM) and not ARENA.intersects(Lay.TRON_HINT) \
+		and Lay.TRON_CAM.end.x <= 1920.0 and Lay.TRON_HINT.end.y <= 1080.0
 	var shader_ok: bool = cam_view != null and cam_view.has_filter()
 	printerr("TRON LAYOUT arena=%.0fx%.0f доля=%.2f столбец=%.2f cam=%s hint=%s фильтр=%s" % [
-		ARENA.size.x, ARENA.size.y, frac, side, CAM_RECT, HINT_RECT,
+		ARENA.size.x, ARENA.size.y, frac, side, Lay.TRON_CAM, Lay.TRON_HINT,
 		"да" if shader_ok else "нет"])
 	if selftest == "layout":
 		if frac >= 0.40 and side >= 0.07 and clean and shader_ok:
@@ -609,49 +608,87 @@ func _draw_sparks() -> void:
 
 
 func _draw_hud() -> void:
-	Neo.text(self, "ТРОН", Vector2(740, 96), 64, Neo.TEXT)
-	Neo.text(self, "раунд %d · до %d побед" % [round_no, WIN_ROUNDS], Vector2(740, 142), 24, Neo.DIM)
-	var n := bikes.size()
-	var total_w := n * 240.0
-	var x0 := 740.0 - total_w * 0.5
-	for i in n:
-		var b: Bike = bikes[i]
-		var p := Vector2(x0 + 240.0 * i + 120.0, 190.0)
-		draw_circle(p - Vector2(58, 0), 12.0, b.color if b.alive else Neo.with_alpha(b.color, 0.35))
-		Neo.text(self, "%s  %d" % [b.title, b.score], p, 28, Neo.TEXT)
-	var hint := "отклоните лицо в сторону — мотоцикл повернёт · в след нельзя"
-	if demo:
-		hint = "стрелки — поворот · в след нельзя"
-	Neo.text(self, hint, Vector2(790, 1000), 24, Neo.DIM)
-	Neo.text(self, "1..5 — режим ввода · ESC — меню", Vector2(220, 1000), 22, Neo.DIM)
-	Neo.text(self, _status_line(), Vector2(1290, 1000), 22, Neo.DIM)
-	# визуальная подсказка: близко — лицом, далеко — рукой
-	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001)
+	Lay.header(self, "ТРОН", "раунд %d · до %d побед" % [round_no, WIN_ROUNDS], "", "")
+	_draw_scores()
+	_draw_status()
+	_draw_footer()
+	InputHint.draw(self, Lay.TRON_HINT, _active_src(), Time.get_ticks_msec() * 0.001)
 	if frozen and state == St.RUN:
-		Neo.text(self, "ПАУЗА: ждём игроков в кадре", Vector2(960, 620), 40, Neo.WARN)
-	if solo:
-		Neo.text(self, "продержался %.1f с · лучший %.1f с · попытка %d/3" % [
-			survival, best_time, round_no], Vector2(790, 950), 22, Neo.DIM)
+		Neo.text(self, "ПАУЗА: ждём игроков в кадре",
+			ARENA.get_center() + Vector2(0.0, 20.0), Lay.T_H1, Neo.WARN)
 	if debug_ui:
-		var y := 900.0
+		var y := Lay.FOOT_Y + 100.0
 		for b in bikes:
 			if b.human:
 				Neo.text(self, "%s ax=%+.2f ay=%+.2f" % [b.title, b.inp.ax, b.inp.ay],
-					Vector2(960, y), 18, Neo.DIM)
-				y += 22.0
+					Vector2(ARENA.get_center().x, y), Lay.T_TINY, Neo.DIM)
+				y += 20.0
+
+
+func _draw_scores() -> void:
+	# Ряд чипов в шапке: цвет, имя, победы — справа, по сетке.
+	var n := bikes.size()
+	var w := 210.0
+	var gap := 20.0
+	var total := float(n) * w + float(maxi(n - 1, 0)) * gap
+	var x0 := Lay.TRON_SCORES.end.x - total
+	for i in n:
+		var b: Bike = bikes[i]
+		Lay.chip(self, Vector2(x0 + float(i) * (w + gap), Lay.TRON_SCORES.position.y),
+			b.color if b.alive else Neo.with_alpha(b.color, 0.45), b.title,
+			"побед: %d" % b.score, w)
+
+
+func _draw_status() -> void:
+	var r := Lay.TRON_STATUS
+	Lay.panel(self, r, "состояние")
+	var b := Lay.body(r)
+	var rows := [
+		["ввод", "рука" if _active_src() == "hand" else "лицо"],
+		["данные", _age_text()],
+	]
+	var y := b.position.y + 12.0
+	for row in rows:
+		Neo.text_left(self, row[0], Vector2(b.position.x, y), Lay.T_TINY,
+			Neo.with_alpha(Neo.DIM, 0.8))
+		Neo.text_left(self, row[1], Vector2(b.position.x + 92.0, y), Lay.T_TINY, Neo.TEXT)
+		y += 26.0
+
+
+func _age_text() -> String:
+	if bridge == null:
+		return "нет трекера"
+	var age: float = bridge.tracking_age()
+	return "нет данных" if is_inf(age) else "%.0f мс" % (age * 1000.0)
+
+
+func _draw_footer() -> void:
+	var hint := "отклоните лицо в сторону — мотоцикл повернёт · в след нельзя"
+	if demo:
+		hint = "демо без трекинга: стрелки — поворот · в след нельзя"
+	Neo.text_left(self, hint, Vector2(Lay.M, Lay.FOOT_Y + 36.0), Lay.T_BODY, Neo.DIM)
+	var keys := "1..5 — режим ввода · ESC — меню"
+	if solo:
+		keys = "продержался %.1f с · лучший %.1f с · попытка %d/3 · %s" % [
+			survival, best_time, round_no, keys]
+	Neo.text_left(self, keys, Vector2(Lay.M, Lay.FOOT_Y + 70.0), Lay.T_SMALL,
+		Neo.with_alpha(Neo.DIM, 0.65))
 
 
 func _draw_overlay() -> void:
 	match state:
 		St.WAIT:
-			Neo.text(self, "ВСТАНЬТЕ ПЕРЕД КАМЕРОЙ", Vector2(960, 560), 44, Neo.TEXT)
-			Neo.text(self, "от 1 до 4 игроков", Vector2(960, 615), 26, Neo.DIM)
+			Neo.text(self, "ВСТАНЬТЕ ПЕРЕД КАМЕРОЙ", ARENA.get_center() - Vector2(0.0, 20.0),
+				Lay.T_H1, Neo.TEXT)
+			Neo.text(self, "от 1 до 4 игроков", ARENA.get_center() + Vector2(0.0, 26.0),
+				Lay.T_H2, Neo.DIM)
 		St.READY:
 			var k := ceili(1.8 - state_t)
-			Neo.text(self, str(maxi(k, 1)), Vector2(960, 560), 120, Neo.PUCK)
+			Neo.text(self, str(maxi(k, 1)), ARENA.get_center() + Vector2(0.0, 40.0), 120,
+				Neo.PUCK)
 		St.RESULT:
 			var who := "никто" if winner < 0 else bikes[winner].title
-			Neo.text(self, "раунд взял %s" % who, Vector2(960, 560), 46,
+			Neo.text(self, "раунд взял %s" % who, ARENA.get_center(), Lay.T_H1,
 				Neo.TEXT if winner < 0 else bikes[winner].color)
 		St.OVER:
 			var best := 0
@@ -662,11 +699,13 @@ func _draw_overlay() -> void:
 				if b.score == best:
 					lead = b.title
 					break
+			var c0 := ARENA.get_center()
 			if solo:
-				Neo.text(self, "лучшее время %.1f с" % best_time, Vector2(960, 540), 56, Neo.OK)
+				Neo.text(self, "лучшее время %.1f с" % best_time, c0 - Vector2(0.0, 10.0),
+					Lay.T_DISPLAY, Neo.OK)
 			else:
-				Neo.text(self, "победил %s" % lead, Vector2(960, 540), 56, Neo.OK)
-			Neo.text(self, "возвращаемся в меню…", Vector2(960, 610), 26, Neo.DIM)
+				Neo.text(self, "победил %s" % lead, c0 - Vector2(0.0, 10.0), Lay.T_DISPLAY, Neo.OK)
+			Neo.text(self, "возвращаемся в меню…", c0 + Vector2(0.0, 40.0), Lay.T_H2, Neo.DIM)
 
 
 ## Активный источник ввода первого живого игрока: "face" или "hand".

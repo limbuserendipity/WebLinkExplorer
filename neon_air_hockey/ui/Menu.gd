@@ -11,26 +11,25 @@ const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
 const CamView := preload("res://core/CamView.gd")
 const InputHint := preload("res://core/InputHint.gd")
+const Lay := preload("res://core/Layout.gd")
 
 const DWELL := 1.2                # сколько держать лицо на плитке для голоса
 const COUNTDOWN := 2.5            # отсчёт перед запуском
 const CARDS := [
 	{"id": "air", "title": "АЭРОХОККЕЙ", "who": "ровно 2 игрока", "min": 2, "max": 2,
 		"scene": "res://game/Main.tscn",
-		"hint": "ракетки в своих половинах · лицо — курсор"},
+		"hint": "ракетки в своих половинах"},
 	{"id": "tron", "title": "ТРОН", "who": "1–4 игрока", "min": 1, "max": 4,
 		"scene": "res://game/Tron.tscn",
-		"hint": "световой след · кто дольше живёт"},
+		"hint": "световой след не прощает"},
 	{"id": "razor", "title": "РАЗОРТРОН 2000", "who": "1–6 игроков", "min": 1, "max": 6,
 		"scene": "res://game/Razor.tscn",
-		"hint": "гонка в закат · кто первый к финишу"},
+		"hint": "гонка в закат до финиша"},
+	{"id": "jump", "title": "НЕОН-ДЖАМП", "who": "1–4 игрока", "min": 1, "max": 4,
+		"scene": "res://game/Jump.tscn",
+		"hint": "прыгай выше всех"},
 ]
-const CARD_W := 420.0
-const CARD_H := 380.0
-const CARD_Y := 300.0
-const CARD_GAP := 60.0
-const CAM_RECT := Rect2(1600.0, 24.0, 296.0, 166.0)   # кадр с камеры
-const HINT_RECT := Rect2(628.0, 682.0, 664.0, 96.0)   # подсказка лицо/рука
+const CHIPS_PER_ROW := 4                 # сколько фишек влезает в ряд
 
 var bridge: Node
 var synth := Sfx.new()
@@ -51,7 +50,7 @@ var state_t := 0.0
 var frame_px := Vector2(1920.0, 1080.0)
 var cursor_pos := {}             # track_id -> Vector2 на экране
 var inputs := {}                 # track_id -> FaceInput (нейтраль и оси)
-var cursor_sens := Vector2(900.0, 560.0)   # размах курсора при полном отклонении
+var cursor_sens := Vector2(1180.0, 520.0)  # размах курсора при полном отклонении
 var cur_min := Vector2(1e9, 1e9)
 var cur_max := Vector2(-1e9, -1e9)
 var msg := ""
@@ -64,9 +63,8 @@ var cam_view: Control = null
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
 	cam_view = CamView.new()
-	cam_view.setup(CAM_RECT)
-	cam_view.subtitle = "фильтр: неон"
 	add_child(cam_view)
+	cam_view.setup(Lay.MENU_CAM)
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--selftest="):
 			selftest = arg.trim_prefix("--selftest=")
@@ -89,6 +87,21 @@ func _ready() -> void:
 	demo = not has_port
 	if not no_audio and selftest == "":
 		synth.setup(self)
+	if selftest == "draw":
+		_draw_all_screens()
+		return
+	if selftest == "grid":
+		# Проверка единой сетки: панели в безопасной зоне и не пересекаются.
+		var bad: Array = Lay.audit()
+		for msg in bad:
+			printerr("GRID: ", msg)
+		if bad.is_empty():
+			printerr("SELFTEST GRID PASS: панели по сетке, кадры 16:9, кегли из шкалы")
+			get_tree().quit(0)
+		else:
+			printerr("SELFTEST GRID FAIL: %d замечаний" % bad.size())
+			get_tree().quit(1)
+		return
 	# Существующие автотесты запускают игру сразу: меню их не задерживает.
 	if forced != "":
 		_load_game(forced)
@@ -118,9 +131,8 @@ func _load_game(id: String) -> void:
 
 
 func _card_rect(i: int) -> Rect2:
-	var total := CARDS.size() * CARD_W + (CARDS.size() - 1) * CARD_GAP
-	var x0 := 960.0 - total * 0.5
-	return Rect2(x0 + i * (CARD_W + CARD_GAP), CARD_Y, CARD_W, CARD_H)
+	return Rect2(Lay.MENU_CARD.position + Vector2(Lay.MENU_CARD_STEP * float(i), 0.0),
+		Lay.MENU_CARD.size)
 
 
 # ---------------------------------------------------------------- игроки
@@ -186,9 +198,13 @@ func _collect_players() -> void:
 
 
 func _chip_pos(i: int, n: int) -> Vector2:
-	# Курсор начинается у «фишки» игрока внизу — оттуда удобно тянуться к плиткам.
-	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
-	return Vector2(x0 + 260.0 * i, 800.0)
+	# Курсор начинается у «фишки» игрока под плитками — оттуда удобно тянуться.
+	var per := mini(maxi(n, 1), CHIPS_PER_ROW)
+	var row := i / CHIPS_PER_ROW
+	var col := i % CHIPS_PER_ROW
+	var step := Lay.MENU_CHIPS.size.x / float(maxi(per, 1))
+	var x0 := Lay.MENU_CHIPS.position.x + step * (float(col) + 0.5)
+	return Vector2(x0, Lay.MENU_CHIPS.position.y + 46.0 + float(row) * 96.0)
 
 
 func _has_track(id: int) -> bool:
@@ -380,6 +396,8 @@ func _input(event: InputEvent) -> void:
 				idx = 1
 			KEY_3:
 				idx = 2
+			KEY_4:
+				idx = 3
 			KEY_SPACE, KEY_ENTER:
 				if _leading() >= 0 and _available(_leading()):
 					_load_game(CARDS[_leading()].id)
@@ -404,82 +422,178 @@ func _input(event: InputEvent) -> void:
 
 
 func _draw() -> void:
-	Neo.grid_bg(self, Vector2(1920, 1080))
-	Neo.text(self, "NEON ARCADE", Vector2(960, 150), 78, Neo.TEXT)
-	Neo.text(self, "наведите лицо на игру и задержите — это ваш голос", Vector2(960, 205), 26, Neo.DIM)
+	Neo.grid_bg(self, Vector2(Lay.W, Lay.H))
+	var keys := "1 / 2 / 3 / 4 — выбрать · Enter — начать"
+	if demo:
+		keys = "демо без трекинга: 1 / 2 / 3 / 4 — запустить игру"
+	Lay.header(self, "NEON ARCADE", "неоновая аркада · голосование лицом",
+		"в кадре: %d" % players.size(), keys)
 	for i in CARDS.size():
 		_draw_card(i)
 	_draw_players()
+	InputHint.draw(self, Lay.MENU_HINT, _active_src(), Time.get_ticks_msec() * 0.001)
 	_draw_cursors()
-	var hint := "1 / 2 / 3 — выбрать, Enter — начать"
-	if demo:
-		hint = "демо без трекинга: 1 / 2 / 3 — запустить игру"
-	Neo.text(self, hint, Vector2(960, 1010), 24, Neo.DIM)
-	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001, true)
-	if msg_t > 0.0:
-		Neo.text(self, msg, Vector2(960, 1050), 22, Neo.WARN)
 	if players.is_empty():
-		Neo.text(self, "встаньте перед камерой", Vector2(960, 780), 32, Neo.WARN)
-	Neo.scanlines(self, Vector2(1920, 1080))
+		Neo.text(self, "встаньте перед камерой", Vector2(729.0, Lay.MENU_MSG_Y), Lay.T_H2,
+			Neo.WARN)
+	if msg_t > 0.0:
+		var font := ThemeDB.fallback_font
+		var w := 0.0
+		if font != null:
+			w = font.get_string_size(msg, HORIZONTAL_ALIGNMENT_LEFT, -1, Lay.T_BODY).x
+		Neo.text_left(self, msg, Vector2(Lay.W - Lay.M - w, Lay.FOOT_Y + 36.0), Lay.T_BODY,
+			Neo.WARN)
+	Neo.scanlines(self, Vector2(Lay.W, Lay.H))
+
+
+func _draw_all_screens() -> void:
+	# В headless _draw сам не зовётся, но зовётся после queue_redraw() на кадре
+	# главного цикла: прогоняем все состояния всех игр, чтобы ошибки в коде
+	# отрисовки (имена, типы, индексы) всплыли здесь, а не на живой машине.
+	var list := [
+		["трон", "res://game/Tron.tscn", 5],
+		["разортрон", "res://game/Razor.tscn", 5],
+		["аэрохоккей", "res://game/Main.tscn", 6],
+		["неон-джамп", "res://game/Jump.tscn", 5],
+	]
+	var bad := 0
+	for item in list:
+		var pk := load(item[1]) as PackedScene
+		if pk == null:
+			printerr("DRAW: не загрузилась сцена ", item[1])
+			bad += 1
+			continue
+		var node: Node = pk.instantiate()
+		add_child(node)
+		node.set_process(false)      # проверяем только отрисовку, не логику
+		for st in int(item[2]):
+			node.set("state", st)
+			node.set("state_t", 0.5)
+			node.queue_redraw()
+			await get_tree().process_frame
+			await get_tree().process_frame
+			printerr("DRAW %s state=%d" % [item[0], st])
+		remove_child(node)
+		node.free()
+	queue_redraw()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	printerr("DRAW меню ok")
+	if bad == 0:
+		printerr("SELFTEST DRAW PASS: все экраны рисуются без ошибок скрипта")
+	get_tree().quit(0 if bad == 0 else 1)
 
 
 func _draw_card(i: int) -> void:
 	var c: Dictionary = CARDS[i]
 	var r := _card_rect(i)
 	var avail := _available(i)
-	var col: Color = Neo.player_color(i) if avail else Neo.with_alpha(Neo.DIM, 0.5)
-	var fill := Color(0.05, 0.01, 0.16, 0.85)
-	draw_rect(r, fill)
-	draw_rect(r, Neo.with_alpha(col, 0.25), false, 8.0)
-	Neo.box(self, r, col, 2.0)
-	Neo.text(self, c.title, Vector2(r.get_center().x, r.position.y + 90.0), 40,
+	var col: Color = Neo.player_color(i) if avail else Neo.with_alpha(Neo.DIM, 0.45)
+	Lay.panel(self, r, "", col)
+	_glyph(Rect2(r.position + Vector2(32.0, 36.0), Vector2(r.size.x - 64.0, 150.0)), i,
+		col if avail else Neo.with_alpha(Neo.DIM, 0.35))
+	var cx := r.get_center().x
+	var top := r.position.y
+	Neo.text(self, c.title, Vector2(cx, top + 236.0), Lay.T_H2,
 		Neo.TEXT if avail else Neo.with_alpha(Neo.DIM, 0.6))
-	Neo.text(self, c.who, Vector2(r.get_center().x, r.position.y + 140.0), 26,
-		col if avail else Neo.with_alpha(Neo.DIM, 0.5))
-	Neo.text(self, c.hint, Vector2(r.get_center().x, r.position.y + 195.0), 19,
+	Neo.text(self, c.who, Vector2(cx, top + 268.0), Lay.T_SMALL, col)
+	Neo.text(self, c.hint, Vector2(cx, top + 294.0), Lay.T_SMALL,
 		Neo.with_alpha(Neo.DIM, 0.85 if avail else 0.4))
 	# кто уже голосует за эту плитку
-	var y := r.position.y + 250.0
+	var bot := r.end.y
 	var n := 0
 	for id in votes.keys():
 		var v: Dictionary = votes[id]
 		if int(v.card) != i:
 			continue
-		var pcol := _color_of(id)
-		draw_circle(Vector2(r.position.x + 60.0 + n * 46.0, y), 15.0, pcol)
+		draw_circle(Vector2(r.position.x + 40.0 + float(n) * 22.0, bot - 64.0), 8.0, Neo.player_color(int(id)))
 		n += 1
-	if n > 0:
-		Neo.text(self, "%d голос%s" % [n, "" if n == 1 else "а"],
-			Vector2(r.get_center().x, y + 52.0), 24, Neo.TEXT)
-	if not avail and c.scene != "":
-		var why := "нужно ровно 2 игрока" if c.id == "air" else "нет игроков"
-		Neo.text(self, why, Vector2(r.get_center().x, r.end.y - 30.0), 20,
-			Neo.with_alpha(Neo.WARN, 0.8))
-	elif c.scene == "":
-		Neo.text(self, "в разработке", Vector2(r.get_center().x, r.end.y - 30.0), 20,
-			Neo.with_alpha(Neo.DIM, 0.5))
+	if avail:
+		var txt := "нет голосов"
+		if n == 1:
+			txt = "1 голос"
+		elif n > 1:
+			txt = "%d голос%s" % [n, "а" if n < 5 else "ов"]
+		Neo.text_left(self, txt, Vector2(r.position.x + 32.0, bot - 24.0), Lay.T_SMALL,
+			Neo.TEXT if n > 0 else Neo.with_alpha(Neo.DIM, 0.7))
+	else:
+		var why := "нужно ровно 2 игрока" if c.id == "air" else "нужен хотя бы 1 игрок"
+		Neo.text_left(self, why, Vector2(r.position.x + 32.0, bot - 24.0), Lay.T_SMALL,
+			Neo.with_alpha(Neo.WARN, 0.85))
+	# клавиша запуска
+	var key := Rect2(Vector2(_key_x(r), bot - 68.0), Vector2(44.0, 44.0))
+	draw_rect(key, Neo.with_alpha(col, 0.10))
+	draw_rect(key, col, false, 1.5)
+	Neo.text(self, str(i + 1), key.get_center() + Vector2(0.0, 10.0), Lay.T_H2, col)
 
 
-func _color_of(track_id: int) -> Color:
-	for p in players:
-		if p.track_id == track_id:
-			return p.color
-	return Neo.DIM
+func _key_x(r: Rect2) -> float:
+	return r.end.x - 24.0 - 44.0
+
+
+## Картинка игры на плитке.
+func _glyph(g: Rect2, i: int, col: Color) -> void:
+	draw_rect(g, Color(0.02, 0.0, 0.06, 0.55))
+	draw_rect(g, Neo.with_alpha(Neo.LINE, 0.20), false, 1.0)
+	var c := g.get_center()
+	match i:
+		0:    # аэрохоккей: стол, центральная линия, две ракетки
+			draw_line(Vector2(c.x, g.position.y + 10.0), Vector2(c.x, g.end.y - 10.0),
+				Neo.with_alpha(Neo.LINE, 0.7), 2.0)
+			draw_arc(c, 46.0, 0.0, TAU, 40, Neo.with_alpha(Neo.LINE, 0.35), 1.5, true)
+			draw_circle(Vector2(g.position.x + 72.0, c.y), 20.0, Neo.with_alpha(Neo.LEFT, 0.9))
+			draw_circle(Vector2(g.end.x - 72.0, c.y), 20.0, Neo.with_alpha(Neo.RIGHT, 0.9))
+		1:    # трон: два следа
+			for j in 2:
+				var y := g.position.y + 38.0 + float(j) * 40.0
+				var col2: Color = Neo.LEFT if j == 0 else Neo.RIGHT
+				draw_line(Vector2(g.position.x + 24.0, y), Vector2(g.end.x - 24.0, y), col2, 3.0)
+				draw_circle(Vector2(g.position.x + 24.0, y), 6.0, col2)
+		2:    # разортрон: дорога и солнце
+			var hz := g.position.y + 30.0
+			draw_circle(Vector2(c.x, hz), 26.0, Neo.with_alpha(Neo.RIGHT, 0.35))
+			draw_line(Vector2(c.x - 16.0, hz), Vector2(g.position.x + 20.0, g.end.y),
+				Neo.with_alpha(Neo.LEFT, 0.9), 2.0)
+			draw_line(Vector2(c.x + 16.0, hz), Vector2(g.end.x - 20.0, g.end.y),
+				Neo.with_alpha(Neo.LEFT, 0.9), 2.0)
+			draw_line(Vector2(c.x, hz), Vector2(c.x, g.end.y), Neo.with_alpha(Neo.PUCK, 0.5), 1.5)
+		3:    # неон-джамп: платформы и человечек в прыжке
+			for j in 3:
+				var py := g.position.y + 118.0 - float(j) * 46.0
+				var px := g.position.x + 26.0 + (0.0 if j % 2 == 0 else 76.0)
+				var c2: Color = Neo.LEFT if j != 1 else Neo.OK
+				draw_line(Vector2(px, py), Vector2(px + 84.0, py), c2, 3.0)
+			var cc := Vector2(g.position.x + 150.0, g.position.y + 46.0)
+			draw_circle(cc, 16.0, Neo.with_alpha(Neo.RIGHT, 0.18))
+			draw_arc(cc, 16.0, 0.0, TAU, 24, Neo.with_alpha(Neo.RIGHT, 0.95), 2.5, true)
+			draw_circle(cc + Vector2(-4.0, -3.0), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
+			draw_circle(cc + Vector2(4.0, -3.0), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
+			for j in 3:
+				draw_circle(cc + Vector2(-18.0, 26.0 + float(j) * 16.0), 3.0,
+					Neo.with_alpha(Neo.RIGHT, 0.5 - float(j) * 0.14))
+		_:
+			Neo.text(self, "?", c, Lay.T_H1, Neo.DIM)
 
 
 func _draw_players() -> void:
 	for i in players.size():
 		var p: Dictionary = players[i]
 		var pos := _chip_pos(i, players.size())
-		draw_circle(pos - Vector2(70, 0), 14.0, p.color)
-		Neo.text(self, p.name, pos, 26, Neo.TEXT)
+		draw_circle(pos - Vector2(150.0, 8.0), 13.0, p.color)
+		Neo.text_left(self, p.name, pos - Vector2(130.0, 0.0), Lay.T_H2, Neo.TEXT)
 		var voted := "не голосовал"
 		if votes.has(p.track_id):
 			voted = CARDS[int(votes[p.track_id].card)].id.to_upper()
-		Neo.text(self, voted, pos + Vector2(0, 34), 20, Neo.DIM)
+		Neo.text_left(self, voted, pos - Vector2(130.0, -24.0), Lay.T_SMALL, Neo.DIM)
 
 
 func _draw_cursors() -> void:
+	if countdown >= 0.0:
+		draw_rect(Rect2(0.0, 0.0, Lay.W, Lay.H), Color(0.02, 0.0, 0.08, 0.62))
+		var k := ceili(countdown)
+		Neo.text(self, str(maxi(k, 1)), Vector2(Lay.W * 0.5, 600.0), 140, Neo.PUCK)
+		Neo.text(self, "запускаем «%s»" % start_target.to_upper(), Vector2(Lay.W * 0.5, 660.0),
+			Lay.T_H2, Neo.TEXT)
 	for p in players:
 		var id: int = p.track_id
 		var pos: Vector2 = cursor_pos.get(id, Vector2.ZERO)
@@ -491,6 +605,3 @@ func _draw_cursors() -> void:
 		if dv > 0.01:
 			draw_arc(pos, 22.0, -PI * 0.5, -PI * 0.5 + TAU * clampf(dv, 0.0, 1.0),
 				32, col, 4.0, true)
-	if countdown >= 0.0:
-		var k := ceili(countdown)
-		Neo.text(self, str(maxi(k, 1)), Vector2(960, 760), 96, Neo.PUCK)

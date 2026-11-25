@@ -1,3 +1,5 @@
 .godot/
 record.cfg
 *.jsonl
+__pycache__/
+tools/layout_*.png
