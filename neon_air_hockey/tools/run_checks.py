@@ -185,6 +185,22 @@ def check_control(r):
     return True, "; ".join(details)
 
 
+@check("lag")
+def check_lag(r):
+    """Задержка управления: после скачка носа ракетка проходит 90% пути ≤ 120 мс."""
+    mock, port = r.start_mock(["--still", "--step", "5", "--step-x", "40",
+                               "--jump-every", "9999", "--duration", "40"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=lag"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"SELFTEST LAG: путь (\d+) px, 90% за (\d+) мс", r.text())
+    ok = "SELFTEST LAG PASS" in r.text()
+    if ok:
+        return True, "90%% пути за %s мс, путь %s px" % (m.group(2), m.group(1))
+    return False, "медленно или нет замера (порог 120 мс)"
+
+
 @check("leave")
 def check_leave(r):
     """Игрок ушёл из кадра → пауза; вернулся → калибровка и продолжение."""
