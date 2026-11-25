@@ -32,6 +32,8 @@ start / hold / end. body_height слегка меняется, имитируя 
   --jump-every S период прыжков одного игрока (по умолчанию 3 с);
   --replay FILE проиграть трассу, записанную игрой (--record=FILE), вместо
                 синтетических игроков; --speed N ускоряет/замедляет её;
+  --still       не двигать лицо и силуэт (для замеров задержки);
+  --step T --step-x PX  на T секунд нос резко уходит на PX пикселей вправо;
   --duration S  завершиться через S секунд (0 = бесконечно);
   --fps N       частота пакетов (по умолчанию 30).
 
@@ -54,21 +56,25 @@ BODY = 0.53
 
 def make_player(args, slot, track_id, cx, t, n, color):
     """Один игрок: голова качается влево-вправо, ноги стоят."""
-    scale = 1.0 + 0.05 * math.sin(2 * math.pi * t / 7.0 + slot)   # шаг к камере/от камеры
+    scale = 1.0 + (0.0 if args.still else 0.05 * math.sin(2 * math.pi * t / 7.0 + slot))
     body = BODY * scale
     head_y = FEET_Y - body
-    sway = 0.09 * math.sin(2 * math.pi * t / (4.0 + 0.6 * slot) + slot * 1.7)
+    sway = 0.0 if args.still else 0.09 * math.sin(2 * math.pi * t / (4.0 + 0.6 * slot) + slot * 1.7)
     if args.legacy:
         cx += sway          # без позы двигаем весь силуэт: рамка и есть вход
     head_x = cx + sway
     # лицо: наклон головы набок (roll) и поворот (yaw), чтобы работал режим tilt
-    roll = 0.18 * math.sin(2 * math.pi * t / (3.3 + 0.4 * slot) + slot)
-    yaw = 0.35 * math.sin(2 * math.pi * t / (4.6 + 0.5 * slot) + slot * 2.1)
+    roll = 0.0 if args.still else 0.18 * math.sin(2 * math.pi * t / (3.3 + 0.4 * slot) + slot)
+    yaw = 0.0 if args.still else 0.35 * math.sin(2 * math.pi * t / (4.6 + 0.5 * slot) + slot * 2.1)
     eye_d = 0.035
     axis = (math.cos(roll), math.sin(roll))
     perp = (-math.sin(roll), math.cos(roll))
     nose_x = head_x + axis[0] * yaw * eye_d
-    nose_y = head_y + axis[1] * yaw * eye_d + perp[1] * eye_d * 0.22
+    nod = 0.0 if args.still else 0.06 * math.sin(2 * math.pi * t / (5.2 + 0.3 * slot) + slot * 1.3)
+    nose_y = head_y + axis[1] * yaw * eye_d + perp[1] * eye_d * 0.22 + nod
+    if args.step is not None and t >= args.step:
+        nose_x += args.step_x / FRAME_W      # резкий скачок носа для замера задержки
+        nose_y += args.step_y / FRAME_H
     eye_l = [round(head_x - axis[0] * eye_d / 2, 4), round(head_y - axis[1] * eye_d / 2, 4), 0.9]
     eye_r = [round(head_x + axis[0] * eye_d / 2, 4), round(head_y + axis[1] * eye_d / 2, 4), 0.9]
     feet = [[cx - 0.05, FEET_Y], [cx + 0.05, FEET_Y]]
@@ -222,6 +228,10 @@ def main():
     ap.add_argument("--hold", type=float, default=0.6)
     ap.add_argument("--jump-every", type=float, default=3.0)
     ap.add_argument("--replay", default="")
+    ap.add_argument("--still", action="store_true")
+    ap.add_argument("--step", type=float, default=None)
+    ap.add_argument("--step-x", type=float, default=40.0)
+    ap.add_argument("--step-y", type=float, default=0.0)
     ap.add_argument("--speed", type=float, default=1.0)
     args = ap.parse_args()
 

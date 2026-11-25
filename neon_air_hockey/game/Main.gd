@@ -30,10 +30,16 @@ const PUCK_MAX_SPEED := 2400.0
 const PUCK_FRICTION := 0.10       # экспоненциальное затухание в секунду
 const WALL_BOUNCE := 0.92
 const HIT_BOUNCE := 0.86
-const PAD_RATE := 14.0            # скорость сглаживания ракетки
-const INPUT_RATE := 12.0          # сглаживание входа
-const RANGE_FACE_X := 0.14        # ход лица по X до края половины (доли высоты кадра)
-const RANGE_FACE_Y := 0.08        # ход лица по Y (наклон/шаг головой)
+const PAD_RATE := 40.0            # сглаживание ракетки: 1/40 = 25 мс, было 14 (71 мс)
+const INPUT_RATE := 25.0          # базовое сглаживание входа (мелкий шум)
+const INPUT_RATE_FAST := 300.0    # добавка за крупное смещение: резкие движения — без лага
+const INPUT_FAST_REF := 0.12      # смещение за кадр (доли хода), где добавка выходит на максимум
+# Лицо-курсор: смещение носа в пикселях, делитель — высота рамки человека (как в
+# «Буксирах»), поэтому близкий и дальний игрок управляют одинаково.
+const RANGE_FACE_REL := 0.25      # полный ход = 25% высоты рамки человека
+const RANGE_FACE_MIN_PX := 18.0   # минимальный делитель, px (как в документе v3)
+const DEADZONE_FACE := 0.06       # мёртвая зона лица в долях полного хода
+const LAG_LIMIT_MS := 120.0       # порог автопроверки задержки (--selftest=lag)
 const RANGE_TILT_X := 0.20        # поворот головы (в долях расстояния между глазами)
 const RANGE_TILT_Y := 0.22        # наклон головы набок, радианы
 const RANGE_LEAN := 0.22          # наклон корпуса в долях роста
@@ -89,6 +95,8 @@ class Paddle:
 	var ny := 0.0
 	var range_x := 0.14
 	var range_y := 0.08
+	var dz := 0.10                 # своя мёртвая зона: у лица она меньше
+	var nose_gap := 0.0            # сколько секунд нос не определялся
 	var ax := 0.0                  # -1..1, по X (вперёд-назад по столу)
 	var ay := 0.0                  # -1..1, по Y (вверх-вниз по столу)
 	var have_input := false
@@ -121,6 +129,7 @@ class Paddle:
 		using_fallback = false
 		legacy = false
 		blind_t = 0.0
+		nose_gap = 0.0
 		conf = 0.0
 
 
@@ -212,6 +221,9 @@ var st_t := 0.0
 var st_stage := 0
 var st_ref := 0.0
 var st_mark := 0.0
+var lag_t0 := 0.0
+var lag_pos0 := Vector2.ZERO
+var lag_samples: Array = []
 var gesture_count := 0
 var phase_count := 0
 var push_count := 0
@@ -710,7 +722,7 @@ func _process(dt: float) -> void:
 	if selftest == "log" and Engine.get_process_frames() % 30 == 0:
 		for s in sides:
 			if s.have_input:
-				printerr("INPUT slot=%d mode=%s raw=(%+.4f, %+.4f) neutral=(%+.4f, %+.4f) range=(%.4f, %.4f) ax=%+.2f ay=%+.2f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
+				printerr("INPUT slot=%d mode=%s raw=(%+.2f, %+.2f) neutral=(%+.2f, %+.2f) range=(%.2f, %.2f) ax=%+.2f ay=%+.2f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
 					s.slot, input_mode, s.rawx, s.rawy, s.nx, s.ny, s.range_x, s.range_y,
 					s.ax, s.ay, s.using_fallback, s.conf, s.pos.x, s.pos.y])
 	if selftest != "":
@@ -746,13 +758,18 @@ func _update_axes(s: Paddle) -> void:
 		return
 	var rgx := maxf(s.range_x, 0.0001)
 	var rgy := maxf(s.range_y, 0.0001)
-	s.ax = clampf(_dz(clampf((s.rawx - s.nx) / rgx, -1.0, 1.0)) * gain * flip_x, -1.0, 1.0)
-	s.ay = clampf(_dz(clampf((s.rawy - s.ny) / rgy, -1.0, 1.0)) * gain * flip_y, -1.0, 1.0)
+	s.ax = clampf(_dz(clampf((s.rawx - s.nx) / rgx, -1.0, 1.0), s.dz) * gain * flip_x, -1.0, 1.0)
+	s.ay = clampf(_dz(clampf((s.rawy - s.ny) / rgy, -1.0, 1.0), s.dz) * gain * flip_y, -1.0, 1.0)
 
 
 func _feed(s: Paddle, rx: float, ry: float, rgx: float, rgy: float,
-		conf: float, dt: float) -> void:
+		conf: float, dt: float, dz := DEADZONE, reactive := false) -> void:
+	# reactive: фильтр «один евро» — мелкий шум гасим, крупное движение пропускаем
+	# сразу. Иначе сглаживание входа добавляет те самые 80 мс задержки.
 	var k := 1.0 - exp(-INPUT_RATE * dt)
+	if reactive:
+		var d := maxf(absf(rx - s.rawx), absf(ry - s.rawy)) / maxf(rgx, 0.0001)
+		k = 1.0 - exp(-(INPUT_RATE + INPUT_RATE_FAST * clampf(d / INPUT_FAST_REF, 0.0, 1.0)) * dt)
 	if s.have_input:
 		s.rawx = lerpf(s.rawx, rx, k)
 		s.rawy = lerpf(s.rawy, ry, k)
@@ -762,6 +779,7 @@ func _feed(s: Paddle, rx: float, ry: float, rgx: float, rgy: float,
 		s.have_input = true
 	s.range_x = maxf(rgx, 0.0001)
 	s.range_y = maxf(rgy, 0.0001)
+	s.dz = dz
 	s.conf = conf
 	_update_axes(s)
 
@@ -778,21 +796,44 @@ func _nose_point(p):
 
 
 func _input_face(s: Paddle, p, aspect: float, dt: float) -> void:
-	# Лицо — это курсор: положение носа в кадре относительно калибровки.
+	# Лицо — курсор. Смещение носа берём в пикселях кадра и делим на высоту
+	# рамки человека: у близкого и дальнего игрока чувствительность одинаковая
+	# (так сделано в «Буксирах», GodotAR-v3, раздел «Управление головой»).
+	var px := _frame_px()
 	var nose = _nose_point(p)
 	s.using_fallback = nose == null
 	if nose == null:
+		s.nose_gap += dt
 		if s.have_neutral and not s.legacy:
 			return    # поза была, голова пропала — держим последнее значение
 		var rect: Rect2 = p.camera_rect_norm
 		if rect.size.y <= 0.01:
 			return
 		s.legacy = not s.have_neutral
-		_feed(s, (rect.position.x + rect.size.x * 0.5) * aspect, rect.position.y,
-			RANGE_FACE_X, RANGE_FACE_Y, p.feet_confidence, dt)
+		var denom_fb := maxf(rect.size.y * px.y * RANGE_FACE_REL, RANGE_FACE_MIN_PX)
+		var c := Vector2((rect.position.x + rect.size.x * 0.5) * px.x,
+			(rect.position.y + rect.size.y * 0.5) * px.y)
+		_feed(s, c.x, c.y, denom_fb, denom_fb, p.feet_confidence, dt, DEADZONE_FACE, true)
 		return
-	_feed(s, nose.x * aspect, nose.y, RANGE_FACE_X, RANGE_FACE_Y,
-		float(p.head.get("conf", p.feet_confidence)), dt)
+	var box_px := maxf(p.camera_rect_norm.size.y * px.y, 24.0)
+	var denom := maxf(box_px * RANGE_FACE_REL, RANGE_FACE_MIN_PX)
+	var nose_px := Vector2(nose.x, nose.y) * px
+	if s.have_neutral and s.nose_gap > 0.3:
+		# Нос вернулся после паузы: заново запоминаем нейтраль, иначе ракетка
+		# прыгнет на всё накопленное смещение (как сброс начала в документе).
+		s.nx = nose_px.x
+		s.ny = nose_px.y
+	s.nose_gap = 0.0
+	_feed(s, nose_px.x, nose_px.y, denom, denom,
+		float(p.head.get("conf", p.feet_confidence)), dt, DEADZONE_FACE, true)
+
+
+func _frame_px() -> Vector2:
+	# Пиксели кадра: frame_size в v2 приходит и в профиле points.
+	var px := Vector2(bridge.frame_size)
+	if px.x < 1.0 or px.y < 1.0:
+		px = Vector2(1920.0, 1080.0)
+	return px
 
 
 func _input_tilt(s: Paddle, p, aspect: float, dt: float) -> bool:
@@ -850,8 +891,8 @@ func _input_lean(s: Paddle, p, aspect: float, dt: float) -> void:
 	_feed(s, bh, lean, RANGE_PROX * bh_neutral, RANGE_LEAN, p.feet_confidence, dt)
 
 
-func _dz(v: float) -> float:
-	return signf(v) * maxf(absf(v) - DEADZONE, 0.0) / (1.0 - DEADZONE)
+func _dz(v: float, dz := DEADZONE) -> float:
+	return signf(v) * maxf(absf(v) - dz, 0.0) / (1.0 - dz)
 
 
 func _side_bounds(s: Paddle) -> Rect2:
@@ -1070,6 +1111,50 @@ func _selftest_tick() -> void:
 			if st_t > 20.0:
 				print("SELFTEST PHYSICS FAIL: гола нет за 20 с, state=", state, " puck=", puck_pos)
 				get_tree().quit(1)
+		"lag":
+			# Скачок носа у эмулятора — мерим, за сколько ракетка проходит 90%
+			# пути. Это и есть «ощущаемая» задержка нашей части конвейера:
+			# фильтр входа + сглаживание ракетки.
+			match st_stage:
+				0:
+					if state == St.PLAY:
+						st_ref = sides[0].rawx
+						st_mark = st_t
+						print("ST lag: игра пошла, ждём скачок носа")
+						st_stage = 1
+				1:
+					if st_t - st_mark > 12.0:
+						print("SELFTEST LAG FAIL: скачка носа не было за 12 с")
+						get_tree().quit(1)
+					elif absf(sides[0].rawx - st_ref) > sides[0].range_x * 0.25:
+						lag_t0 = st_t
+						lag_pos0 = sides[0].pos
+						lag_samples.clear()
+						st_stage = 2
+				2:
+					var td := st_t - lag_t0
+					lag_samples.append(Vector2(td, (sides[0].pos - lag_pos0).length()))
+					if td > 1.0:
+						var fin := 0.0
+						for v in lag_samples:
+							fin = maxf(fin, v.y)
+						var t90 := -1.0
+						for v in lag_samples:
+							if v.y >= fin * 0.9:
+								t90 = v.x
+								break
+						if fin < 20.0 or t90 < 0.0:
+							print("SELFTEST LAG FAIL: ракетка не сдвинулась (%.0f px)" % fin)
+							get_tree().quit(1)
+						else:
+							print("SELFTEST LAG: путь %.0f px, 90%% за %.0f мс (порог %.0f)" % [
+								fin, t90 * 1000.0, LAG_LIMIT_MS])
+							if t90 * 1000.0 <= LAG_LIMIT_MS:
+								print("SELFTEST LAG PASS")
+								get_tree().quit(0)
+							else:
+								print("SELFTEST LAG FAIL: медленно")
+								get_tree().quit(1)
 		"protocol":
 			match st_stage:
 				0:
@@ -1274,11 +1359,16 @@ func _draw_hud() -> void:
 	var st: Dictionary = bridge.tracking_stats()
 	var lat: Dictionary = st.get("latency_ms", {})
 	var jit: Dictionary = st.get("jitter_ms", {})
+	var age: float = bridge.tracking_age()
+	var age_txt := "нет данных" if is_inf(age) else "данные %.0f мс" % (age * 1000.0)
 	if not lat.is_empty():
-		_text("задержка входа p95 %.0f мс · джиттер %.1f мс · кадр %dx%d" % [
-			float(lat.get("p95", 0.0)), float(jit.get("p95", 0.0)),
+		_text("данные %s · задержка входа p95 %.0f мс · джиттер %.1f мс · кадр %dx%d" % [
+			age_txt, float(lat.get("p95", 0.0)), float(jit.get("p95", 0.0)),
 			bridge.frame_size.x, bridge.frame_size.y], Vector2(960, 972), 20,
 			Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
+	elif not is_inf(age):
+		_text("данные %s · кадр %dx%d" % [age_txt, bridge.frame_size.x, bridge.frame_size.y],
+			Vector2(960, 972), 20, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.55))
 
 
 func _hint_line() -> String:
