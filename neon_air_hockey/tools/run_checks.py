@@ -122,7 +122,7 @@ def check_physics(r):
 
 @check("protocol")
 def check_protocol(r):
-    """Трекинг: 2 игрока, калибровка, движение ракетки за головой, жесты."""
+    """v2: 2 игрока, калибровка, наклон корпуса двигает ракетку, жесты и толчок."""
     mock, port = r.start_mock(["--duration", "45"])
     try:
         code = r.run_game(["--port=" + port, "--selftest=protocol"], timeout=45)
@@ -198,6 +198,97 @@ def check_drop(r):
     if code is not None:
         return True, "игра завершилась сама, код %s" % code
     return False, "игра пережила обрыв соединения"
+
+
+@check("phases")
+def check_phases(r):
+    """Фазы жеста start/hold/end доходят, старт даёт толчок ракеткой."""
+    mock, port = r.start_mock(["--jump-every", "1", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(6)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = ("PHASE jump hold" in text and "PHASE jump end" in text
+          and "PUSH slot=" in text and "SCRIPT ERROR" not in text)
+    return ok, "фазы hold/end и толчок видны в логе" if ok else "фаз или толчка нет"
+
+
+@check("lowconf")
+def check_lowconf(r):
+    """Жест с confidence 0.45 не двигает игру (порог 0.75)."""
+    mock, port = r.start_mock(["--jump-every", "1", "--lowconf", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(5)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "PUSH slot=" not in text and "STATE PLAY" in text
+    return ok, "ложных толчков нет" if ok else "жест ниже порога сработал"
+
+
+@check("lost")
+def check_lost(r):
+    """state=lost при свежих данных → пауза сразу, без ожидания устаревания."""
+    mock, port = r.start_mock(["--lost", "4", "--gone-for", "1.5", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(7.5)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "трек потерян" in text and "STATE PAUSED" in text and "STATE READY" in text
+    return ok, "пауза по state и возврат в игру" if ok else "пауза по state не сработала"
+
+
+@check("reacquire")
+def check_reacquire(r):
+    """reacquired=true при confirmed → пауза «вернулся» и перекалибровка."""
+    mock, port = r.start_mock(["--reacq-flag", "4", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(8)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "вернулся" in text and text.count("STATE PAUSED") >= 1
+    return ok, "возврат трека обработан" if ok else "reacquired не обработан"
+
+
+@check("nohead")
+def check_nohead(r):
+    """Пропала точка головы: без падений, через 2 с пауза с понятной причиной."""
+    mock, port = r.start_mock(["--lose-head", "5", "--gone-for", "3", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(10)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "потеряна точка головы" in text and "SCRIPT ERROR" not in text
+    return ok, "«слепой» режим и пауза сработали" if ok else "пропажа головы не обработана"
+
+
+@check("legacy")
+def check_legacy(r):
+    """Источник без позы и frame_size: работает фолбэк по рамке, игра играбельна."""
+    mock, port = r.start_mock(["--legacy", "--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(8)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "fallback=true" in text and "STATE PLAY" in text and "SCRIPT ERROR" not in text
+    return ok, "фолбэк по рамке, раунд идёт" if ok else "совместимость со старым источником нарушена"
 
 
 @check("video")

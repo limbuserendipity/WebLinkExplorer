@@ -1,6 +1,7 @@
 extends Node
 
 signal gesture(slot: int, action: String, confidence: float)
+signal gesture_phase(slot: int, track_id: int, action: String, phase: String, confidence: float, at: float, duration: float)
 const Player = preload("res://shared/VirtualPlayer.gd")
 const MAX_JSON := 131072
 const MAX_JPEG := 4194304
@@ -10,6 +11,14 @@ var clean_room_texture: ImageTexture
 var image_owners: Dictionary = {}
 var image_mask_slots: Array = []
 var image_frame_id := -1
+var capabilities: Array = []
+var capture_time: float = -1.0
+var tracking_time: float = -1.0
+var frame_size := Vector2i.ZERO
+var _tentative_players: Array = []
+var _latencies: Array[float] = []
+var _jitters: Array[float] = []
+var _last_received := -1.0
 var _peer := StreamPeerTCP.new()
 var _connected := false
 var _port := 0
@@ -47,6 +56,21 @@ func players() -> Array:
 
 func all_players() -> Array:
 	return _players.duplicate()
+
+func tentative_players() -> Array:
+	return _tentative_players.duplicate(true)
+
+func tracking_stats() -> Dictionary:
+	return {"samples": _latencies.size(), "latency_ms": _percentiles(_latencies),
+		"jitter_ms": _percentiles(_jitters)}
+
+func _percentiles(values: Array[float]) -> Dictionary:
+	if values.is_empty():
+		return {}
+	var sorted := values.duplicate()
+	sorted.sort()
+	return {"p50": sorted[ceili(sorted.size() * 0.50) - 1],
+		"p95": sorted[ceili(sorted.size() * 0.95) - 1]}
 
 func rotation_checkpoint() -> void:
 	if _rotation_seconds > 0.0 and Time.get_ticks_msec() * 0.001 - _started_at >= _rotation_seconds:
@@ -141,6 +165,30 @@ func _update_texture(texture: ImageTexture, image: Image) -> ImageTexture:
 
 func _accept(info: Dictionary, now: float) -> void:
 	_tracking_time = now - float(info.tracking_age)
+	capabilities = info.get("capabilities", [])
+	_tentative_players.clear()
+	for row in info.get("tentative_players", []):
+		var r: Array = row.get("rect", [])
+		_tentative_players.append({"track_id": int(row.track_id), "state": "tentative",
+			"sample_id": int(row.sample_id),
+			"camera_rect_norm": Rect2(r[0], r[1], r[2], r[3]) if r.size() == 4 else Rect2()})
+	var size_px = info.get("frame_size")
+	if size_px is Array and size_px.size() == 2:
+		frame_size = Vector2i(int(size_px[0]), int(size_px[1]))
+	if info.get("capture_time") != null:
+		capture_time = float(info.capture_time)
+	if info.get("tracking_time") != null:
+		var sample_time := float(info.tracking_time)
+		if sample_time != tracking_time:
+			_latencies.append(float(info.tracking_age) * 1000.0)
+			if tracking_time >= 0 and sample_time > tracking_time and _last_received >= 0:
+				_jitters.append(absf((now - _last_received) - (sample_time - tracking_time)) * 1000.0)
+			if _latencies.size() > 180:
+				_latencies.pop_front()
+			if _jitters.size() > 180:
+				_jitters.pop_front()
+			tracking_time = sample_time
+			_last_received = now
 	var owners := {}
 	_players.clear()
 	for row in info.players:
@@ -158,15 +206,43 @@ func _accept(info: Dictionary, now: float) -> void:
 		p.feet_confidence = float(row.get("feet_confidence", 0.0))
 		p.mask_slot = int(row.get("mask_slot", 0))
 		p.sample_id = int(row.get("sample_id", -1))
+		var head = row.get("head")
+		if head is Dictionary and head.get("p") is Array and head.p.size() == 2:
+			p.head = {"p": Vector2(head.p[0], head.p[1]), "conf": float(head.conf)}
+		if row.get("body_height") != null:
+			p.body_height = float(row.body_height)
+		p.keypoints = _pose_points(row.get("keypoints", []))
+		p.shoulders = _pose_points(row.get("shoulders", []))
+		p.hips = _pose_points(row.get("hips", []))
+		p.wrists = _pose_points(row.get("wrists", []))
+		p.ankles = _pose_points(row.get("ankles", []))
+		p.state = str(row.get("state", "confirmed"))
+		if row.get("lost_since") != null:
+			p.lost_since = float(row.lost_since)
+		p.reacquired = bool(row.get("reacquired", false))
+		p.reacquired_sample_id = int(row.get("reacquired_sample_id", -1))
 		_players.append(p)
 		owners[p.slot] = p.track_id
-	for event in info.gestures:
+	var events: Array = info.get("gestures", []) + info.get("gesture_phases", [])
+	events.sort_custom(func(a, b): return int(a.id) < int(b.id))
+	for event in events:
 		var event_id := int(event.id)
 		if event_id <= _last_event:
 			continue
 		_last_event = event_id
-		if tracking_age() < 0.4 and owners.get(int(event.slot)) == int(event.track_id):
-			gesture.emit(int(event.slot), str(event.action), float(event.confidence))
+		var phase := str(event.get("phase", "start"))
+		var matches: bool = owners.get(int(event.slot)) == int(event.track_id)
+		if phase == "end" or (tracking_age() < 0.4 and matches):
+			if phase == "start":
+				gesture.emit(int(event.slot), str(event.action), float(event.confidence))
+			gesture_phase.emit(int(event.slot), int(event.track_id), str(event.action), phase,
+				float(event.confidence), float(event.get("at", -1.0)), float(event.get("duration", 0.0)))
+
+func _pose_points(points: Array) -> Array:
+	var result := []
+	for point in points:
+		result.append(Vector3(point[0], point[1], point[2]) if point is Array and point.size() == 3 else null)
+	return result
 
 # Клавиши оператора закрывают отдельное окно и возвращают управление зеркалу.
 func _unhandled_key_input(event: InputEvent) -> void:
