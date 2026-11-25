@@ -46,7 +46,7 @@ var state_t := 0.0
 var frame_px := Vector2(1920.0, 1080.0)
 var cursor_pos := {}             # track_id -> Vector2 на экране
 var inputs := {}                 # track_id -> FaceInput (нейтраль и оси)
-var cursor_sens := Vector2(900.0, 700.0)   # размах курсора при полном отклонении
+var cursor_sens := Vector2(900.0, 560.0)   # размах курсора при полном отклонении
 var cur_min := Vector2(1e9, 1e9)
 var cur_max := Vector2(-1e9, -1e9)
 var msg := ""
@@ -65,7 +65,7 @@ func _ready() -> void:
 		elif arg == "--no-audio":
 			no_audio = true
 		elif arg.begins_with("--gain="):
-			cursor_sens = Vector2(900.0, 700.0) * clampf(float(arg.trim_prefix("--gain=")), 0.3, 3.0)
+			cursor_sens = Vector2(900.0, 560.0) * clampf(float(arg.trim_prefix("--gain=")), 0.3, 3.0)
 		elif arg.begins_with("--control="):
 			input_mode = arg.trim_prefix("--control=").to_lower()
 		elif arg == "--debug":
@@ -170,7 +170,7 @@ func _collect_players() -> void:
 func _chip_pos(i: int, n: int) -> Vector2:
 	# Курсор начинается у «фишки» игрока внизу — оттуда удобно тянуться к плиткам.
 	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
-	return Vector2(x0 + 260.0 * i, 870.0)
+	return Vector2(x0 + 260.0 * i, 800.0)
 
 
 func _has_track(id: int) -> bool:
