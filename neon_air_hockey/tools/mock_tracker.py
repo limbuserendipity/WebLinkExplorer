@@ -65,10 +65,31 @@ def walk_scale(t):
     return 1.0
 
 
+COLORS = [(0.1, 0.8, 1.0), (1.0, 0.25, 0.9), (0.45, 1.0, 0.35),
+          (1.0, 0.78, 0.2), (0.66, 0.42, 1.0), (1.0, 0.45, 0.3)]
+
+
+def slot_x(slot, count):
+    """Расставляет игроков по кадру: 2 — по краям, 6 — в ряд."""
+    if count <= 1:
+        return 0.5
+    return 0.06 + 0.88 * slot / float(count - 1)
+
+
+def track_of(slot, last_right):
+    if slot == 0:
+        return 42
+    if slot == 1:
+        return last_right
+    return 42 + slot * 10
+
+
 def make_player(args, slot, track_id, cx, t, n, color):
     """Один игрок: голова качается влево-вправо, ноги стоят."""
-    if args.walk:
-        scale = walk_scale(t)          # игрок отошёл и вернулся
+    if args.far:
+        scale = 0.45                   # игрок далеко: рамка ~0.28 высоты кадра
+    elif args.walk:
+        scale = walk_scale(t)          # игрок отходит и возвращается
     elif args.still:
         scale = 1.0
     else:
@@ -111,8 +132,14 @@ def make_player(args, slot, track_id, cx, t, n, color):
                  [round(head_x + 0.075, 4), round(head_y + 0.10, 4), 0.94]]
     hips = [[round(cx - 0.06, 4), round(FEET_Y - body * 0.45, 4), 0.9],
             [round(cx + 0.06, 4), round(FEET_Y - body * 0.45, 4), 0.9]]
-    wrists = [[round(head_x - 0.11, 4), round(head_y + 0.16, 4), 0.8],
-              [round(head_x + 0.11, 4), round(head_y + 0.16, 4), 0.8]]
+    wx = 0.0
+    wy = 0.0
+    if args.wave:
+        # машем руками: то одна, то другая уходит в сторону — проверка ввода рукой
+        wx = 0.09 * math.sin(2 * math.pi * t / 2.6 + slot)
+        wy = 0.08 * math.sin(2 * math.pi * t / 3.4 + slot + 1.1)
+    wrists = [[round(head_x - 0.11 - wx, 4), round(head_y + 0.16 - wy, 4), 0.8],
+              [round(head_x + 0.11 + wx, 4), round(head_y + 0.16 - wy, 4), 0.8]]
     ankles = [[feet[0][0], feet[0][1], 0.91], [feet[1][0], feet[1][1], 0.91]]
     keypoints = [
         [round(nose_x, 4), round(nose_y, 4), 0.97],                  # нос
@@ -245,6 +272,9 @@ def main():
     ap.add_argument("--jump-every", type=float, default=3.0)
     ap.add_argument("--replay", default="")
     ap.add_argument("--still", action="store_true")
+    ap.add_argument("--count", type=int, default=2, help="сколько игроков в кадре (1..6)")
+    ap.add_argument("--far", action="store_true", help="игрок далеко: рамка ~0.28 кадра")
+    ap.add_argument("--wave", action="store_true", help="игрок машет руками (ввод рукой)")
     ap.add_argument("--walk", action="store_true",
                     help="игрок отходит от камеры на 5-7 с и возвращается на 12-15 с")
     ap.add_argument("--step", type=float, default=None)
@@ -282,8 +312,8 @@ def main():
     swapped = False
     leave_logged = False
     stale_logged = False
-    jumps = {0: {"next": 1.0, "active": False, "t0": 0.0, "last_hold": 0.0},
-             1: {"next": 1.6, "active": False, "t0": 0.0, "last_hold": 0.0}}
+    jumps = {i: {"next": 1.0 + 0.3 * i, "active": False, "t0": 0.0, "last_hold": 0.0}
+             for i in range(args.count)}
     reacquire_until = -1.0
     reacquire_logged = False
     reacquire_done = False
@@ -325,13 +355,16 @@ def main():
                 tentatives = []
                 empty_now = args.empty is not None and args.empty <= t < args.empty + args.gone_for
                 if not empty_now:
-                    players.append(make_player(args, 0, 42, 0.28, t, n, [0.1, 0.8, 1.0]))
-                    if not right_gone:
-                        players.append(make_player(args, 1, last_right, 0.72, t, n,
-                                                   [1.0, 0.25, 0.9]))
-                    elif not args.legacy:
-                        tentatives.append({"track_id": last_right, "state": "tentative",
-                                           "sample_id": n, "rect": [0.62, 0.20, 0.18, 0.55]})
+                    for slot in range(args.count):
+                        if slot == 1 and right_gone:
+                            if not args.legacy:
+                                tentatives.append({"track_id": last_right,
+                                                   "state": "tentative", "sample_id": n,
+                                                   "rect": [0.62, 0.20, 0.18, 0.55]})
+                            continue
+                        players.append(make_player(args, slot, track_of(slot, last_right),
+                                                   slot_x(slot, args.count), t, n,
+                                                   COLORS[slot % len(COLORS)]))
                 # состояние и возврат
                 if args.lost is not None and args.lost <= t < args.lost + args.gone_for:
                     for row in players:

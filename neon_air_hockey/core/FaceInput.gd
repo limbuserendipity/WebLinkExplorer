@@ -7,9 +7,9 @@ extends RefCounted
 ## сама (иначе после «отошёл и вернулся» ракетка упирается в стену и не
 ## дотягивается до другой).
 
-const MODES := ["face", "tilt", "lean"]
+const MODES := ["auto", "face", "hand", "tilt", "lean"]
 
-const RANGE_FACE_REL := 0.25      # полный ход лица = 25% высоты рамки человека
+const RANGE_FACE_REL := 0.20      # полный ход лица = 20% высоты рамки человека
 const RANGE_FACE_MIN_PX := 18.0   # минимальный делитель, px (как в документе v3)
 const RANGE_TILT_X := 0.20        # поворот головы (в долях межглазного расстояния)
 const RANGE_TILT_Y := 0.22        # наклон головы набок, радианы
@@ -26,6 +26,12 @@ const POINT_CONF := 0.30          # ниже — точка позы ненад�
 const RECAL_BOX := 0.15           # рамка изменилась на 15% — нейтраль устарела
 const NOSE_GAP := 0.3             # нос пропадал дольше — запоминаем нейтраль заново
 
+# Рука: далеко от камеры нос двигается на десяток пикселей — рукой сподручнее.
+const HAND_CONF := 0.30           # уверенность запястья
+const RANGE_HAND_REL := 0.70      # полный ход руки = 70% высоты рамки человека
+const FAR_RATIO := 0.42           # рамка меньше 42% высоты кадра — «далеко», рука
+const NEAR_RATIO := 0.50          # больше 50% — «близко», лицо (гистерезис)
+
 var mode := "face"
 var gain := 1.0
 var flip_x := 1.0
@@ -41,7 +47,18 @@ var dz := DEADZONE_FACE
 var ax := 0.0                     # -1..1 по X (вперёд-назад)
 var ay := 0.0                     # -1..1 по Y (вверх-вниз)
 var have_input := false
-var have_neutral := false
+var have_face := false            # нейтраль лица снята
+var have_hand := false            # нейтраль рук снята
+var active := "face"              # что реально работает: face | hand
+var far_ratio := 0.5              # высота рамки / высота кадра (для подсказки)
+var hand_nx := [0.0, 0.0]         # нейтрали запястий (L, R), пиксели
+var hand_ny := [0.0, 0.0]
+var hand_ready := [false, false]
+var hand_idx := -1
+
+var have_neutral: bool:           # нейтраль ИСТОЧНИКА, которым сейчас управляем
+	get:
+		return have_hand if active == "hand" else have_face
 var using_fallback := false       # нет позы — считаем по рамке
 var legacy := false               # источник без позы вообще
 var conf := 0.0
@@ -58,7 +75,9 @@ func reset_calibration() -> void:
 	sumx = 0.0
 	sumy = 0.0
 	samples = 0
-	have_neutral = false
+	have_face = false
+	have_hand = false
+	active = "face"
 	have_input = false
 	rawx = 0.0
 	rawy = 0.0
@@ -68,6 +87,8 @@ func reset_calibration() -> void:
 	ay = 0.0
 	range_x = 1.0
 	range_y = 1.0
+	hand_ready = [false, false]
+	hand_idx = -1
 	using_fallback = false
 	legacy = false
 	nose_gap = 0.0
@@ -96,7 +117,10 @@ func finish_calibration() -> void:
 		return
 	nx = sumx / float(samples)
 	ny = sumy / float(samples)
-	have_neutral = true
+	if active == "hand":
+		have_hand = true
+	else:
+		have_face = true
 	legacy = using_fallback
 	_recompute()
 
@@ -104,21 +128,90 @@ func finish_calibration() -> void:
 func update(p, dt: float, aspect: float, frame_px: Vector2) -> void:
 	match mode:
 		"tilt":
+			active = "face"
 			if _tilt(p, aspect, dt, frame_px):
 				return
 			_face(p, dt, aspect, frame_px)
 		"lean":
+			active = "face"
 			_lean(p, aspect, dt, frame_px)
+		"hand":
+			active = "hand"
+			_hand(p, dt, frame_px)
+		"auto":
+			_update_active(p, frame_px)
+			if active == "hand":
+				_hand(p, dt, frame_px)
+			else:
+				_face(p, dt, aspect, frame_px)
 		_:
+			active = "face"
 			_face(p, dt, aspect, frame_px)
 
 
 func recenter() -> void:
 	# Мгновенно привязать нейтраль к текущему положению (клавиша перецентровки).
-	if have_input:
+	if not have_input:
+		return
+	if active == "hand":
+		hand_ready = [false, false]
+		have_hand = false
+	else:
 		nx = rawx
 		ny = rawy
-		_recompute()
+		nyr = -1.0
+	_recompute()
+
+
+func mode_label() -> String:
+	# Для подсказки на экране: чем сейчас управляем.
+	match mode:
+		"hand":
+			return "рука"
+		"tilt":
+			return "наклон головы"
+		"lean":
+			return "корпус"
+		"auto":
+			return "рука" if active == "hand" else "лицо"
+		_:
+			return "лицо"
+
+
+func _update_active(p, frame_px: Vector2) -> void:
+	# Гистерезис по видимому размеру человека: близко — лицо, далеко — рука.
+	var box_h: float = maxf(p.camera_rect_norm.size.y * frame_px.y, 1.0)
+	far_ratio = box_h / maxf(frame_px.y, 1.0)
+	if active == "face" and far_ratio < FAR_RATIO and _has_hand(p):
+		active = "hand"
+		have_input = false          # источники в разных единицах — без плавного перехода
+	elif active == "hand" and far_ratio > NEAR_RATIO:
+		active = "face"
+		have_input = false
+
+
+static func _has_hand(p) -> bool:
+	var pts := hand_points(p)
+	return pts[0] != null or pts[1] != null
+
+
+static func hand_points(p) -> Array:
+	# Запястья: сначала поле wrists (v2), иначе keypoints 9 и 10 (COCO).
+	var out := [null, null]
+	var wr: Array = p.wrists if p.wrists != null else []
+	if wr.size() == 2:
+		for i in 2:
+			var pt = wr[i]
+			if pt != null and pt is Vector3 and pt.z >= HAND_CONF:
+				out[i] = pt
+		if out[0] != null or out[1] != null:
+			return out
+	var kp: Array = p.keypoints
+	for i in 2:
+		var idx := 9 + i
+		if kp.size() > idx and kp[idx] != null and kp[idx].z >= HAND_CONF:
+			out[i] = kp[idx]
+	return out
 
 
 # ---------------------------------------------------------------- режимы
@@ -131,12 +224,12 @@ func _face(p, dt: float, _aspect: float, frame_px: Vector2) -> void:
 	using_fallback = nose == null
 	if nose == null:
 		nose_gap += dt
-		if have_neutral and not legacy:
+		if have_face and not legacy:
 			return    # поза была, голова пропала — держим последнее значение
 		var rect: Rect2 = p.camera_rect_norm
 		if rect.size.y <= 0.01:
 			return
-		legacy = not have_neutral
+		legacy = not have_face
 		var denom_fb := maxf(rect.size.y * frame_px.y * RANGE_FACE_REL, RANGE_FACE_MIN_PX)
 		var c := Vector2((rect.position.x + rect.size.x * 0.5) * frame_px.x,
 			(rect.position.y + rect.size.y * 0.5) * frame_px.y)
@@ -145,7 +238,7 @@ func _face(p, dt: float, _aspect: float, frame_px: Vector2) -> void:
 	var box_h: float = maxf(p.camera_rect_norm.size.y * frame_px.y, 24.0)
 	var box_top: float = p.camera_rect_norm.position.y * frame_px.y
 	var nose_px := Vector2(nose.x, nose.y) * frame_px
-	if have_neutral and box_h > 1.0:
+	if have_face and box_h > 1.0:
 		if nyr < 0.0:
 			# Запоминаем нейтраль по высоте ОТНОСИТЕЛЬНО рамки человека:
 			# тогда она сама пересчитывается, когда игрок отходит или подходит,
@@ -167,6 +260,41 @@ func _face(p, dt: float, _aspect: float, frame_px: Vector2) -> void:
 	var denom := maxf(box_h * RANGE_FACE_REL, RANGE_FACE_MIN_PX)
 	_feed(nose_px.x, nose_px.y, denom, denom,
 		float(p.head.get("conf", p.feet_confidence)), dt, DEADZONE_FACE, true)
+
+
+func _hand(p, dt: float, frame_px: Vector2) -> void:
+	# Управление рукой: берём ту руку, которая сильнее отклонена от своей
+	# нейтрали, — двигать можно любой, вторая не мешает.
+	var pts := hand_points(p)
+	var box_h: float = maxf(p.camera_rect_norm.size.y * frame_px.y, 24.0)
+	var denom := maxf(box_h * RANGE_HAND_REL, RANGE_FACE_MIN_PX)
+	var best := -1
+	var best_dev := -1.0
+	for i in 2:
+		var pt = pts[i]
+		if pt == null:
+			continue
+		var w := Vector2(pt.x, pt.y) * frame_px
+		if not hand_ready[i]:
+			hand_nx[i] = w.x
+			hand_ny[i] = w.y
+			hand_ready[i] = true
+		var dev := maxf(absf(w.x - float(hand_nx[i])), absf(w.y - float(hand_ny[i]))) / denom
+		if dev > best_dev:
+			best_dev = dev
+			best = i
+	if best < 0:
+		using_fallback = true
+		return
+	using_fallback = false
+	have_hand = true
+	hand_idx = best
+	var pt2 = pts[best]
+	var wpx := Vector2(pt2.x, pt2.y) * frame_px
+	nx = hand_nx[best]
+	ny = hand_ny[best]
+	nose_gap = 0.0
+	_feed(wpx.x, wpx.y, denom, denom, float(pt2.z), dt, DEADZONE_FACE, true)
 
 
 func _tilt(p, aspect: float, dt: float, _frame_px: Vector2) -> bool:
@@ -211,15 +339,15 @@ func _lean(p, aspect: float, dt: float, _frame_px: Vector2) -> void:
 		legacy = false
 		lean = (hp.x - feet_mid.x) * aspect / bh
 	else:
-		if have_neutral and not legacy:
+		if have_face and not legacy:
 			return
 		var rect: Rect2 = p.camera_rect_norm
 		if rect.size.y <= 0.01:
 			return
-		legacy = not have_neutral
+		legacy = not have_face
 		bh = rect.size.y
 		lean = (rect.position.x + rect.size.x * 0.5) * aspect / bh
-	var bh_neutral: float = nx if have_neutral and nx > 0.01 else bh
+	var bh_neutral: float = nx if have_face and nx > 0.01 else bh
 	_feed(bh, lean, RANGE_PROX * bh_neutral, RANGE_LEAN, p.feet_confidence, dt)
 
 

@@ -22,6 +22,8 @@ extends Node2D
 
 var win_score := 5                 # матч до N голов (--win-score=N)
 const TABLE := Rect2(210.0, 260.0, 1500.0, 700.0)
+const CAM_RECT := Rect2(810.0, 22.0, 300.0, 169.0)   # кадр с камеры
+const HINT_RECT := Rect2(24.0, 968.0, 664.0, 104.0)  # подсказка лицо/рука
 const GOAL_HALF := 130.0          # половина высоты створа ворот
 const PUCK_R := 24.0
 const PAD_R := 46.0
@@ -34,8 +36,10 @@ const PAD_RATE := 40.0            # сглаживание ракетки: 1/40 
 # Лицо-курсор: смещение носа в пикселях, делитель — высота рамки человека (как в
 # «Буксирах»), поэтому близкий и дальний игрок управляют одинаково.
 const LAG_LIMIT_MS := 120.0       # порог автопроверки задержки (--selftest=lag)
-const CONTROL_MODES := ["face", "tilt", "lean"]
+const CONTROL_MODES := Inp.MODES
 const Inp := preload("res://core/FaceInput.gd")   # общая модель ввода
+const CamView := preload("res://core/CamView.gd")  # кадр с камеры + фильтр
+const InputHint := preload("res://core/InputHint.gd")  # подсказка лицо/рука
 const DEFAULT_RECORD := "user://packets.jsonl"      # --record без пути
 const RECORD_SWITCH := "res://record.cfg"           # файл-переключатель записи
 const GESTURE_CONF := 0.75        # порог уверенности жеста (как в документе)
@@ -151,7 +155,7 @@ var next_serve := 0
 var last_count := -1
 var demo := false
 var selftest := ""
-var input_mode := "face"          # face | tilt | lean (--control=)
+var input_mode := "auto"          # auto | face | hand | tilt | lean (--control=)
 var gain := 1.0                   # множитель чувствительности (--gain=)
 var flip_x := 1.0
 var flip_y := 1.0
@@ -179,10 +183,14 @@ var last_serve := 0
 var rebind_pending := false
 var rng := RandomNumberGenerator.new()
 var synth := Sfx.new()
+var cam_view = null
 
 
 func _ready() -> void:
 	bridge = get_node("/root/GameDirector")
+	cam_view = CamView.new()
+	cam_view.setup(CAM_RECT)
+	add_child(cam_view)
 	bridge.gesture.connect(_on_gesture)
 	bridge.gesture_phase.connect(_on_gesture_phase)
 	rng.randomize()
@@ -212,7 +220,7 @@ func _ready() -> void:
 			debug_ui = true
 	demo = not has_port
 	if not CONTROL_MODES.has(input_mode):
-		input_mode = "face"
+		input_mode = "auto"
 	if record_path == "" and FileAccess.file_exists(RECORD_SWITCH):
 		# Файл-переключатель: игру запускает система трекинга, флаги ей не передать.
 		var cfg := FileAccess.open(RECORD_SWITCH, FileAccess.READ)
@@ -331,8 +339,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			KEY_SPACE:
 				if state == St.WAITING or state == St.OVER:
 					_start_demo_match()
-			KEY_1, KEY_2, KEY_3:
-				_set_input_mode(CONTROL_MODES[[KEY_1, KEY_2, KEY_3].find(event.keycode)])
+			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5:
+				var keys := [KEY_1, KEY_2, KEY_3, KEY_4, KEY_5]
+				_set_input_mode(CONTROL_MODES[keys.find(event.keycode)])
 			KEY_F1:
 				debug_ui = not debug_ui
 
@@ -660,16 +669,41 @@ func _process(dt: float) -> void:
 		St.OVER:
 			_tick_over(dt, tracking_ok)
 	_tick_blind(dt)
+	_update_cam()
 	_record_tick()
 	if selftest == "log" and Engine.get_process_frames() % 30 == 0:
 		for s in sides:
 			if s.have_input:
-				printerr("INPUT slot=%d mode=%s raw=(%+.2f, %+.2f) neutral=(%+.2f, %+.2f) range=(%.2f, %.2f) ax=%+.2f ay=%+.2f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
-					s.slot, input_mode, s.rawx, s.rawy, s.nx, s.ny, s.range_x, s.range_y,
+				printerr("INPUT slot=%d mode=%s src=%s raw=(%+.2f, %+.2f) neutral=(%+.2f, %+.2f) range=(%.2f, %.2f) ax=%+.2f ay=%+.2f fallback=%s conf=%.2f pos=(%.0f, %.0f)" % [
+					s.slot, input_mode, s.inp.active, s.rawx, s.rawy, s.nx, s.ny, s.range_x, s.range_y,
 					s.ax, s.ay, s.using_fallback, s.conf, s.pos.x, s.pos.y])
 	if selftest != "":
 		_selftest_tick()
 	queue_redraw()
+
+
+## Какой источник ввода активен у первого живого игрока: "face" или "hand".
+func _active_src() -> String:
+	for s in sides:
+		if s.have_input:
+			return s.inp.active
+	return "hand" if input_mode == "hand" else "face"
+
+
+## Обновляет кадр с вебкамеры: текстура, рамки игроков, подпись.
+func _update_cam() -> void:
+	if cam_view == null or bridge == null:
+		return
+	var boxes := []
+	for p in bridge.all_players():
+		if p.age_ticks >= 30:
+			continue
+		var rr: Rect2 = p.camera_rect_norm
+		if rr.size.x <= 0.001:
+			continue
+		boxes.append({"rect": rr, "color": p.color, "label": ""})
+	cam_view.subtitle = "ввод: рука" if _active_src() == "hand" else "ввод: лицо"
+	cam_view.set_feed(bridge.camera_texture, boxes, bridge.frame_age() < 1.5)
 
 
 # ---------------------------------------------------------------- управление
@@ -907,6 +941,21 @@ func _selftest_tick() -> void:
 					get_tree().quit(0)
 				else:
 					print("SELFTEST WAITING FAIL: state=", state)
+					get_tree().quit(1)
+		"cam":
+			# Кадр с вебкамеры виден и идёт через неоновый фильтр.
+			if st_t > 2.5:
+				var fresh: bool = cam_view != null and cam_view.fresh
+				var boxes: int = cam_view.boxes.size() if cam_view != null else 0
+				var filt: float = cam_view.filter_amount if cam_view != null else 0.0
+				var shader_ok: bool = cam_view != null and cam_view.has_filter()
+				print("SELFTEST CAM: кадр=%s рамок=%d фильтр=%.2f шейдер=%s" % [
+					"да" if fresh else "нет", boxes, filt, "да" if shader_ok else "нет"])
+				if fresh and boxes > 0 and shader_ok and filt > 0.05:
+					print("SELFTEST CAM PASS")
+					get_tree().quit(0)
+				else:
+					print("SELFTEST CAM FAIL: кадра или фильтра нет")
 					get_tree().quit(1)
 		"physics":
 			if scores[0] >= 1 or scores[1] >= 1:
@@ -1163,31 +1212,15 @@ func _draw_hud() -> void:
 	_text("ИГРОК 1", Vector2(393, 205), 24, C_LEFT)
 	_text("ИГРОК 2", Vector2(1527, 205), 24, C_RIGHT)
 	_text("МАТЧ ДО %d" % win_score, Vector2(960, 228), 22, C_DIM)
-	# мини-превью камеры с рамками игроков
-	var pr := Rect2(810, 22, 300, 169)
-	draw_rect(pr, Color(0, 0, 0, 0.5))
-	var tex = bridge.camera_texture
-	if tex != null and bridge.frame_age() < 1.5:
-		draw_texture_rect(tex, pr, false)
-		for p in bridge.all_players():
-			if p.age_ticks >= 30:
-				continue
-			var rr: Rect2 = p.camera_rect_norm
-			if rr.size.x <= 0.001:
-				continue
-			var box := Rect2(pr.position + Vector2(rr.position.x * pr.size.x, rr.position.y * pr.size.y),
-				Vector2(rr.size.x * pr.size.x, rr.size.y * pr.size.y))
-			draw_rect(box, p.color, false, 2.0)
-			draw_circle(Vector2(box.position.x + box.size.x * 0.5, box.position.y), 3.0, p.color)
-	else:
-		_text("НЕТ ВИДЕО", pr.position + pr.size * 0.5 + Vector2(0, 8), 22, C_DIM)
-	draw_rect(pr, Color(C_LINE.r, C_LINE.g, C_LINE.b, 0.6), false, 2.0)
+	# кадр с вебкамеры (фильтр + рамки игроков) — узел CamView, см. _update_cam
 	# подсказки
 	if demo:
-		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт,  1/2/3 — режим ввода", Vector2(960, 1010), 24, C_DIM)
+		_text("ДЕМО БЕЗ ТРЕКИНГА:  P1 — WASD,  P2 — стрелки,  Пробел — старт,  1..5 — режим ввода", Vector2(1240, 1000), 24, C_DIM)
 	else:
-		_text(_hint_line(), Vector2(960, 1010), 24, C_DIM)
-		_text("в отсчёт стойте ровно, смотрите в камеру — снимается нейтраль", Vector2(960, 1044), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+		_text(_hint_line(), Vector2(1240, 1000), 24, C_DIM)
+		_text("в отсчёт стойте ровно, смотрите в камеру — снимается нейтраль", Vector2(1240, 1032), 22, Color(C_DIM.r, C_DIM.g, C_DIM.b, 0.6))
+	# визуальная подсказка: близко — лицом, далеко — рукой
+	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001, true)
 	_draw_input_sticks()
 	_draw_debug_panel()
 	var st: Dictionary = bridge.tracking_stats()

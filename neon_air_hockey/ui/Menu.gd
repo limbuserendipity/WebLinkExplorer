@@ -9,6 +9,8 @@ extends Node2D
 const Inp := preload("res://core/FaceInput.gd")
 const Neo := preload("res://core/Neon.gd")
 const Sfx := preload("res://core/Sfx.gd")
+const CamView := preload("res://core/CamView.gd")
+const InputHint := preload("res://core/InputHint.gd")
 
 const DWELL := 1.2                # сколько держать лицо на плитке для голоса
 const COUNTDOWN := 2.5            # отсчёт перед запуском
@@ -19,13 +21,16 @@ const CARDS := [
 	{"id": "tron", "title": "ТРОН", "who": "1–4 игрока", "min": 1, "max": 4,
 		"scene": "res://game/Tron.tscn",
 		"hint": "световой след · кто дольше живёт"},
-	{"id": "soon", "title": "СКОРО", "who": "—", "min": 99, "max": 99,
-		"scene": "", "hint": "место для следующей игры"},
+	{"id": "razor", "title": "РАЗОРТРОН 2000", "who": "1–6 игроков", "min": 1, "max": 6,
+		"scene": "res://game/Razor.tscn",
+		"hint": "гонка в закат · кто первый к финишу"},
 ]
 const CARD_W := 420.0
 const CARD_H := 380.0
 const CARD_Y := 300.0
 const CARD_GAP := 60.0
+const CAM_RECT := Rect2(1600.0, 24.0, 296.0, 166.0)   # кадр с камеры
+const HINT_RECT := Rect2(628.0, 682.0, 664.0, 96.0)   # подсказка лицо/рука
 
 var bridge: Node
 var synth := Sfx.new()
@@ -45,12 +50,23 @@ var forced := ""
 var state_t := 0.0
 var frame_px := Vector2(1920.0, 1080.0)
 var cursor_pos := {}             # track_id -> Vector2 на экране
+var inputs := {}                 # track_id -> FaceInput (нейтраль и оси)
+var cursor_sens := Vector2(900.0, 560.0)   # размах курсора при полном отклонении
+var cur_min := Vector2(1e9, 1e9)
+var cur_max := Vector2(-1e9, -1e9)
 var msg := ""
+var input_mode := "auto"
+var debug_ui := false
 var msg_t := 0.0
+var cam_view: Control = null
 
 
 func _ready() -> void:
 	bridge = get_node_or_null("/root/GameDirector")
+	cam_view = CamView.new()
+	cam_view.setup(CAM_RECT)
+	cam_view.subtitle = "фильтр: неон"
+	add_child(cam_view)
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--selftest="):
 			selftest = arg.trim_prefix("--selftest=")
@@ -58,6 +74,12 @@ func _ready() -> void:
 			forced = arg.trim_prefix("--game=")
 		elif arg == "--no-audio":
 			no_audio = true
+		elif arg.begins_with("--gain="):
+			cursor_sens = Vector2(900.0, 560.0) * clampf(float(arg.trim_prefix("--gain=")), 0.3, 3.0)
+		elif arg.begins_with("--control="):
+			input_mode = arg.trim_prefix("--control=").to_lower()
+		elif arg == "--debug":
+			debug_ui = true
 		elif arg.begins_with("--port="):
 			demo = false
 	var has_port := false
@@ -70,8 +92,16 @@ func _ready() -> void:
 	# Существующие автотесты запускают игру сразу: меню их не задерживает.
 	if forced != "":
 		_load_game(forced)
-	elif selftest != "" and selftest != "menu":
-		_load_game("tron" if selftest == "tron" else "air")
+	elif selftest != "" and selftest != "menu" and selftest != "cursor" \
+			and selftest != "hint":
+		_load_game(selftest if _has_card(selftest) else "air")
+
+
+func _has_card(id: String) -> bool:
+	for c in CARDS:
+		if c.id == id and c.scene != "":
+			return true
+	return false
 
 
 func _exit_tree() -> void:
@@ -104,26 +134,61 @@ func _collect_players() -> void:
 	frame_px = Vector2(bridge.frame_size)
 	if frame_px.x < 1.0 or frame_px.y < 1.0:
 		frame_px = Vector2(1920.0, 1080.0)
+	var aspect := frame_px.x / frame_px.y
 	var list: Array = bridge.players()
 	list.sort_custom(func(a, b): return a.camera_rect_norm.position.x < b.camera_rect_norm.position.x)
 	var i := 0
 	for p in list:
 		if str(p.state) != "confirmed":
 			continue
-		var nose := Inp.nose_screen(p, frame_px)
+		var id: int = p.track_id
+		var fi = inputs.get(id, null)
+		if fi == null:
+			fi = Inp.new()
+			inputs[id] = fi
+		fi.mode = input_mode
+		fi.update(p, get_process_delta_time(), aspect, frame_px)
+		if not fi.have_neutral:
+			fi.accumulate()
+			if fi.samples >= 12:
+				fi.finish_calibration()
 		var col: Color = p.color if p.color is Color else Neo.player_color(i)
-		players.append({"slot": p.slot, "track_id": p.track_id, "color": col,
-			"nose": nose, "name": "игрок %d" % (i + 1)})
-		cursor_pos[p.track_id] = Vector2(nose.x * 1920.0, nose.y * 1080.0)
+		players.append({"slot": p.slot, "track_id": id, "color": col,
+			"name": "игрок %d" % (i + 1), "calibrated": fi.have_neutral})
+		cursor_pos[id] = Vector2.ZERO       # посчитаем после, когда известно число игроков
 		i += 1
 		if i >= 4:
 			break
-	# забываем тех, кто ушёл
+	# Курсор — НЕ абсолютная позиция носа: лицо в кадре двигается мало. Берём
+	# отклонение от нейтрали (ax, ay) и разгоняем его до размаха экрана.
+	var n := players.size()
+	for k in n:
+		var p: Dictionary = players[k]
+		var fi = inputs.get(p.track_id, null)
+		if fi == null:
+			continue
+		var off := Vector2(fi.ax, fi.ay) * cursor_sens
+		cursor_pos[p.track_id] = _chip_pos(k, n) + off
+		cur_min = Vector2(minf(cur_min.x, off.x), minf(cur_min.y, off.y))
+		cur_max = Vector2(maxf(cur_max.x, off.x), maxf(cur_max.y, off.y))
+		if debug_ui:
+			printerr("MENU INPUT slot=%d ax=%+.2f ay=%+.2f neutral=%s cursor=(%.0f, %.0f)" % [
+				p.slot, fi.ax, fi.ay, fi.have_neutral, cursor_pos[p.track_id].x,
+				cursor_pos[p.track_id].y])
 	for key in votes.keys():
 		if not _has_track(key):
 			votes.erase(key)
 			dwell.erase(key)
 			hover.erase(key)
+	for key in inputs.keys():
+		if not _has_track(key):
+			inputs.erase(key)
+
+
+func _chip_pos(i: int, n: int) -> Vector2:
+	# Курсор начинается у «фишки» игрока внизу — оттуда удобно тянуться к плиткам.
+	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
+	return Vector2(x0 + 260.0 * i, 800.0)
 
 
 func _has_track(id: int) -> bool:
@@ -205,9 +270,14 @@ func _process(dt: float) -> void:
 	if bridge != null:
 		bridge.rotation_checkpoint()
 	_collect_players()
+	_update_cam()
 	if selftest == "menu":
 		_selftest_vote(dt)
-	if players.size() > 0:
+	if selftest == "hint":
+		_selftest_hint()
+	if selftest == "cursor":
+		_selftest_cursor()
+	elif players.size() > 0:
 		_tick_voting(dt)
 	# если проголосовали не все, но кто-то ушёл из кадра — запускаем лидера по таймауту
 	if players.size() > 0 and votes.size() < players.size() and _leading() >= 0 \
@@ -231,6 +301,61 @@ func _process(dt: float) -> void:
 				_load_game(start_target)
 				return
 	queue_redraw()
+
+
+## Активный источник ввода первого игрока: "face" или "hand".
+func _active_src() -> String:
+	for p in players:
+		var inp = inputs.get(p.track_id)
+		if inp != null and inp.have_input:
+			return inp.active
+	return "hand" if input_mode == "hand" else "face"
+
+
+func _update_cam() -> void:
+	if cam_view == null or bridge == null:
+		return
+	var boxes := []
+	for p in bridge.all_players():
+		if p.age_ticks >= 30:
+			continue
+		var rr: Rect2 = p.camera_rect_norm
+		if rr.size.x <= 0.001:
+			continue
+		boxes.append({"rect": rr, "color": p.color, "label": ""})
+	cam_view.subtitle = "ввод: рука" if _active_src() == "hand" else "ввод: лицо"
+	cam_view.set_feed(bridge.camera_texture, boxes, bridge.frame_age() < 1.5)
+
+
+## Проверка подсказки «близко — лицом, далеко — рукой»: виджет загружен,
+## тексты на месте, активный источник определяется.
+func _selftest_hint() -> void:
+	if state_t < 2.0 or players.is_empty():
+		return
+	var src := _active_src()
+	if src != "face" and src != "hand":
+		printerr("SELFTEST HINT FAIL: источник ввода не определён")
+		get_tree().quit(1)
+		return
+	printerr("SELFTEST HINT: источник=%s плиток=%d игроков=%d" % [src, CARDS.size(), players.size()])
+	printerr("SELFTEST HINT PASS")
+	get_tree().quit(0)
+
+
+func _selftest_cursor() -> void:
+	# Проверка «курсор ходит по всему экрану», а не на пару сантиметров.
+	if state_t < 1.5 or players.is_empty():
+		return
+	var spread := cur_max - cur_min
+	if state_t > 5.5:
+		var ok := spread.x > 600.0 and spread.y > 200.0
+		printerr("SELFTEST MENU CURSOR: размах X=%.0f px, Y=%.0f px" % [spread.x, spread.y])
+		if ok:
+			printerr("SELFTEST MENU CURSOR PASS")
+			get_tree().quit(0)
+		else:
+			printerr("SELFTEST MENU CURSOR FAIL: курсор почти не двигается")
+			get_tree().quit(1)
 
 
 func _selftest_vote(dt: float) -> void:
@@ -290,6 +415,7 @@ func _draw() -> void:
 	if demo:
 		hint = "демо без трекинга: 1 / 2 / 3 — запустить игру"
 	Neo.text(self, hint, Vector2(960, 1010), 24, Neo.DIM)
+	InputHint.draw(self, HINT_RECT, _active_src(), Time.get_ticks_msec() * 0.001, true)
 	if msg_t > 0.0:
 		Neo.text(self, msg, Vector2(960, 1050), 22, Neo.WARN)
 	if players.is_empty():
@@ -342,11 +468,9 @@ func _color_of(track_id: int) -> Color:
 
 
 func _draw_players() -> void:
-	var n := players.size()
-	var x0 := 960.0 - 260.0 * maxf(n - 1, 0) * 0.5
-	for i in n:
+	for i in players.size():
 		var p: Dictionary = players[i]
-		var pos := Vector2(x0 + 260.0 * i, 870.0)
+		var pos := _chip_pos(i, players.size())
 		draw_circle(pos - Vector2(70, 0), 14.0, p.color)
 		Neo.text(self, p.name, pos, 26, Neo.TEXT)
 		var voted := "не голосовал"

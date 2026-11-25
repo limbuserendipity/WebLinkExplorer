@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Автопроверки Neon Air Hockey (Godot AR API v2, 15 сценариев).
+"""Автопроверки Neon Arcade (Godot AR API v2): аэрохоккей, «Трон», «Разортрон».
 
 Запускает игру с эмулятором трекинга и проверяет ключевые сценарии из
 приёмочного списка: жизненный цикл треков, паузы, жесты, три режима ввода
@@ -198,6 +198,46 @@ def check_menu(r):
     text = r.text()
     ok = "MENU START tron" in text and "TRON START players=2" in text
     return ok, ("меню -> трон, 2 игрока" if ok else "меню не запустило игру")
+
+
+@check("cursor")
+def check_cursor(r):
+    """Курсор меню ходит по всему экрану (относительное смещение, а не позиция носа)."""
+    mock, port = r.start_mock(["--duration", "30"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=cursor"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"SELFTEST MENU CURSOR: размах X=(\d+) px, Y=(\d+) px", r.text())
+    ok = "SELFTEST MENU CURSOR PASS" in r.text()
+    return ok, ("размах курсора X=%s px, Y=%s px" % (m.group(1), m.group(2))
+                if ok and m else "курсор почти не двигается")
+
+
+@check("troninput")
+def check_troninput(r):
+    """«Трон»: ввод людей работает — нейтраль калибруется, мотоцикл поворачивает."""
+    mock, port = r.start_mock(["--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--game=tron", "--selftest=log"])
+        time.sleep(8)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    if "TRON CALIB slot=" not in text:
+        return False, "нейтраль не калибруется"
+    axes = []
+    wants = set()
+    for m in re.finditer(r"TRON INPUT slot=\d ax=([-+][\d.]+) ay=([-+][\d.]+).*want=\((-?\d),(-?\d)\)",
+                         text):
+        axes.append(max(abs(float(m.group(1))), abs(float(m.group(2)))))
+        wants.add((m.group(3), m.group(4)))
+    if not axes or max(axes) < 0.4:
+        return False, "оси не отклоняются (max %.2f)" % (max(axes) if axes else 0.0)
+    if len(wants) < 2:
+        return False, "мотоцикл не поворачивает (want=%s)" % sorted(wants)
+    return True, "нейтраль снята, оси до %.2f, повороты работают" % max(axes)
 
 
 @check("tron")
@@ -415,6 +455,137 @@ def check_video(r):
     bad = re.search(r"SCRIPT ERROR|Cannot load|Failed to load", r.text())
     seq = states(r)
     return bad is None and "PLAY" in seq, "состояния: " + " → ".join(seq)
+
+
+INPUT_RE = re.compile(r"INPUT slot=(\d) mode=(\w+) src=(\w+).*?ax=([-+][\d.]+) ay=([-+][\d.]+)")
+
+
+def input_rows(text):
+    return [(m.group(1), m.group(2), m.group(3), float(m.group(4)), float(m.group(5)))
+            for m in INPUT_RE.finditer(text)]
+
+
+@check("facemode")
+def check_facemode(r):
+    """Вблизи (auto): управление идёт лицом — src=face, оси отклоняются."""
+    mock, port = r.start_mock(["--duration", "20"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(6)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    rows = input_rows(r.text())
+    if not rows:
+        return False, "нет строк INPUT"
+    face = [x for x in rows if x[2] == "face"]
+    if len(face) < len(rows) * 0.8:
+        return False, "источник не лицо: %s" % sorted({x[2] for x in rows})
+    mx = max(max(abs(x[3]), abs(x[4])) for x in face)
+    if mx < 0.4:
+        return False, "лицо не отклоняет оси (max %.2f)" % mx
+    return True, "игрок близко → src=face, оси до %.2f, кадров %d" % (mx, len(face))
+
+
+@check("handmode")
+def check_handmode(r):
+    """Далеко (auto): управление само переходит на руку — src=hand и оси ходят."""
+    mock, port = r.start_mock(["--far", "--wave", "--duration", "25"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=log"])
+        time.sleep(8)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    rows = input_rows(r.text())
+    if not rows:
+        return False, "нет строк INPUT"
+    hand = [x for x in rows if x[2] == "hand"]
+    if len(hand) < 5:
+        return False, "на руку не переключился: %s" % sorted({x[2] for x in rows})
+    if rows[-1][2] != "hand":
+        return False, "последний источник — %s, а не рука" % rows[-1][2]
+    mx = max(max(abs(x[3]), abs(x[4])) for x in hand)
+    if mx < 0.3:
+        return False, "рука не двигает оси (max %.2f)" % mx
+    return True, "игрок далеко → src=hand, оси до %.2f, кадров рукой %d" % (mx, len(hand))
+
+
+@check("camfilter")
+def check_camfilter(r):
+    """Вебкамера видна в игре и идёт через неоновый ретро-фильтр."""
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        return None, "пропущено: нет Pillow (pip install pillow)"
+    mock, port = r.start_mock(["--video", "--duration", "20"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=cam"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"SELFTEST CAM: (.+)", r.text())
+    ok = "SELFTEST CAM PASS" in r.text()
+    return ok, (m.group(1) if ok and m else "кадр с камеры не выводится или фильтра нет")
+
+
+@check("hint")
+def check_hint(r):
+    """Подсказка «близко — лицом, далеко — рукой» есть в меню и знает активный ввод."""
+    mock, port = r.start_mock(["--duration", "20"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=hint"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"SELFTEST HINT: (.+)", r.text())
+    ok = "SELFTEST HINT PASS" in r.text()
+    return ok, (m.group(1) if ok and m else "подсказка не отчиталась")
+
+
+@check("tronui")
+def check_tronui(r):
+    """«Трон»: поле крупнее, пустые углы заняты — камера с фильтром и подсказка справа."""
+    mock, port = r.start_mock(["--duration", "20"])
+    try:
+        r.run_game(["--port=" + port, "--game=tron", "--selftest=layout"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"TRON LAYOUT (.+)", r.text())
+    ok = "SELFTEST LAYOUT PASS" in r.text()
+    return ok, (m.group(1) if m else "раскладка не отчиталась")
+
+
+@check("razor")
+def check_razor(r):
+    """«Разортрон 2000»: меню запускает гонку, заезд доезжает до финиша."""
+    mock, port = r.start_mock(["--duration", "40"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=razor"], timeout=60)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    if "MENU -> razor" not in text:
+        return False, "меню не запустило гонку"
+    m = re.search(r"SELFTEST RAZOR PASS: (.+)", text)
+    ok = "SELFTEST RAZOR PASS" in text and "RAZOR START" in text
+    return ok, (m.group(1) if ok and m else "заезд не доехал до финиша")
+
+
+@check("razor6")
+def check_razor6(r):
+    """«Разортрон» на шестерых: шесть игроков в кадре — шесть машин на трассе."""
+    mock, port = r.start_mock(["--count", "6", "--duration", "40"])
+    try:
+        r.run_game(["--port=" + port, "--game=razor", "--selftest=razor"], timeout=60)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    if "RAZOR START players=6" not in text:
+        return False, "до гонки не дошло 6 игроков"
+    m = re.search(r"RAZOR RACE state=\d lead=(\d+) m cars=(\d+)", text)
+    if not m or int(m.group(2)) != 6:
+        return False, "машин не шесть: %s" % (m.group(0) if m else "нет строк RAZOR RACE")
+    ok = "SELFTEST RAZOR PASS" in text
+    return ok, ("6 машин, заезд доехал" if ok else "заезд не доехал до финиша")
 
 
 def main():
