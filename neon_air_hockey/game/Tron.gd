@@ -251,7 +251,10 @@ func _place_bike(b: Bike, i: int, n: int) -> void:
 
 
 func _tick_run(dt: float) -> void:
+	_update_frozen()
 	if frozen:
+		if bridge != null:
+			bridge.rotation_checkpoint()
 		return
 	survival += dt
 	_read_humans(dt)
@@ -266,6 +269,31 @@ func _tick_run(dt: float) -> void:
 		_step_world()
 		if state != St.RUN:
 			return
+
+
+func _update_frozen() -> void:
+	# Игрок вышел из кадра или поток замолк — замораживаем раунд, чтобы
+	# мотоцикл не разбился без хозяина.
+	if demo or bridge == null:
+		frozen = false
+		return
+	if bridge.tracking_age() > STALE:
+		frozen = true
+		return
+	var ps: Array = bridge.players()
+	for b in bikes:
+		if not b.human:
+			continue
+		var found := false
+		for p in ps:
+			if p.slot == b.track_slot and p.track_id == b.track_id \
+					and str(p.state) == "confirmed":
+				found = true
+				break
+		if not found:
+			frozen = true
+			return
+	frozen = false
 
 
 func _read_humans(_dt: float) -> void:
@@ -553,6 +581,8 @@ func _draw_hud() -> void:
 	if demo:
 		hint = "стрелки — поворот · в след нельзя"
 	Neo.text(self, hint, Vector2(960, 1000), 24, Neo.DIM)
+	if frozen and state == St.RUN:
+		Neo.text(self, "ПАУЗА: ждём игроков в кадре", Vector2(960, 620), 40, Neo.WARN)
 	if solo:
 		Neo.text(self, "продержался %.1f с · лучший %.1f с · попытка %d/3" % [
 			survival, best_time, round_no], Vector2(960, 955), 22, Neo.DIM)
