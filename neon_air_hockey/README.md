@@ -63,8 +63,17 @@ godot --path . -- --port=N --debug             # панель чисел в HUD 
 
 ```bash
 godot --path . -- --port=N --record=packets.jsonl     # пишет каждый новый кадр
+godot --path . -- --port=N --record                   # путь по умолчанию:
+                                                      # user://packets.jsonl
 python3 tools/mock_tracker.py --replay packets.jsonl  # проиграть запись обратно
 ```
+
+В обычном сценарии игру запускает система трекинга, и флаги ей не передать.
+На этот случай есть файл-переключатель: создайте `neon_air_hockey/record.cfg`
+(пустой — писать в `user://packets.jsonl`, или с путём в первой строке) —
+игра начнёт запись при обычном запуске из системы. Полный путь печатается
+в консоль игрой: `пишу трассу ввода в /home/…/packets.jsonl`.
+Удалите `record.cfg`, чтобы выключить запись.
 
 Формат — по объекту JSON на строку, только по новым `sample_id`:
 

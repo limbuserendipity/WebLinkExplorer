@@ -43,6 +43,8 @@ const HEAD_CONF := 0.35           # ниже — считаем голову н�
 const FEET_CONF := 0.30           # ниже — лодыжки ненадёжны
 const POINT_CONF := 0.30          # ниже — точка позы ненадёжна
 const CONTROL_MODES := ["face", "tilt", "lean"]
+const DEFAULT_RECORD := "user://packets.jsonl"      # --record без пути
+const RECORD_SWITCH := "res://record.cfg"           # файл-переключатель записи
 const GESTURE_CONF := 0.75        # порог уверенности жеста (как в документе)
 const PUSH_TIME := 0.35           # спад толчка после жеста, с
 const PUSH_DIST := 95.0           # насколько вперёд выдвигается ракетка толчком, px
@@ -241,8 +243,10 @@ func _ready() -> void:
 			input_mode = arg.trim_prefix("--control=").to_lower()
 		elif arg.begins_with("--gain="):
 			gain = clampf(float(arg.trim_prefix("--gain=")), 0.1, 5.0)
-		elif arg.begins_with("--record="):
+		elif arg.begins_with("--record=") or arg == "--record":
 			record_path = arg.trim_prefix("--record=")
+			if record_path == "":
+				record_path = DEFAULT_RECORD       # просто «--record» — путь по умолчанию
 		elif arg == "--flip-x":
 			flip_x = -1.0
 		elif arg == "--flip-y":
@@ -252,13 +256,26 @@ func _ready() -> void:
 	demo = not has_port
 	if not CONTROL_MODES.has(input_mode):
 		input_mode = "face"
+	if record_path == "" and FileAccess.file_exists(RECORD_SWITCH):
+		# Файл-переключатель: игру запускает система трекинга, флаги ей не передать.
+		var cfg := FileAccess.open(RECORD_SWITCH, FileAccess.READ)
+		if cfg != null:
+			var txt := cfg.get_as_text()
+			cfg.close()
+			for line in txt.split("\n"):
+				var t := line.strip_edges()
+				if t != "" and not t.begins_with("#"):
+					record_path = t
+					break
+			if record_path == "":
+				record_path = DEFAULT_RECORD
 	if record_path != "":
 		record_file = FileAccess.open(record_path, FileAccess.WRITE)
 		record_t0 = Time.get_ticks_msec() * 0.001
 		if record_file == null:
 			printerr("не смог открыть файл записи: ", record_path)
 		else:
-			printerr("пишу трассу ввода в ", record_path)
+			printerr("пишу трассу ввода в ", ProjectSettings.globalize_path(record_path))
 	puck_pos = TABLE.position + TABLE.size * 0.5
 	if selftest == "physics":
 		_start_demo_match()
