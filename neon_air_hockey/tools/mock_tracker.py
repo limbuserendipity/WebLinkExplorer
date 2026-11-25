@@ -54,9 +54,25 @@ FEET_Y = 0.75
 BODY = 0.53
 
 
+def walk_scale(t):
+    """Рост в кадре: 5-7 с отошёл до 0.72, 7-12 далеко, 12-15 вернулся."""
+    if 5.0 <= t < 7.0:
+        return 1.0 - 0.28 * (t - 5.0) / 2.0
+    if 7.0 <= t < 12.0:
+        return 0.72
+    if 12.0 <= t < 15.0:
+        return 0.72 + 0.28 * (t - 12.0) / 3.0
+    return 1.0
+
+
 def make_player(args, slot, track_id, cx, t, n, color):
     """Один игрок: голова качается влево-вправо, ноги стоят."""
-    scale = 1.0 + (0.0 if args.still else 0.05 * math.sin(2 * math.pi * t / 7.0 + slot))
+    if args.walk:
+        scale = walk_scale(t)          # игрок отошёл и вернулся
+    elif args.still:
+        scale = 1.0
+    else:
+        scale = 1.0 + 0.05 * math.sin(2 * math.pi * t / 7.0 + slot)
     body = BODY * scale
     head_y = FEET_Y - body
     sway = 0.0 if args.still else 0.09 * math.sin(2 * math.pi * t / (4.0 + 0.6 * slot) + slot * 1.7)
@@ -229,6 +245,8 @@ def main():
     ap.add_argument("--jump-every", type=float, default=3.0)
     ap.add_argument("--replay", default="")
     ap.add_argument("--still", action="store_true")
+    ap.add_argument("--walk", action="store_true",
+                    help="игрок отходит от камеры на 5-7 с и возвращается на 12-15 с")
     ap.add_argument("--step", type=float, default=None)
     ap.add_argument("--step-x", type=float, default=40.0)
     ap.add_argument("--step-y", type=float, default=0.0)

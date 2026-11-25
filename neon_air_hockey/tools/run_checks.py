@@ -185,6 +185,45 @@ def check_control(r):
     return True, "; ".join(details)
 
 
+@check("menu")
+def check_menu(r):
+    """Меню аркады: игроки голосуют, запускается выбранная игра (Трон)."""
+    mock, port = r.start_mock(["--duration", "30"])
+    try:
+        game = r.start_game(["--port=" + port, "--selftest=menu"])
+        time.sleep(6)
+        r.stop(game)
+    finally:
+        r.stop(mock)
+    text = r.text()
+    ok = "MENU START tron" in text and "TRON START players=2" in text
+    return ok, ("меню -> трон, 2 игрока" if ok else "меню не запустило игру")
+
+
+@check("tron")
+def check_tron(r):
+    """«Трон»: раунд с ботами заканчивается, победитель определяется."""
+    code = r.run_game(["--selftest=tron"], timeout=40)
+    ok = "SELFTEST TRON PASS" in r.text()
+    detail = re.search(r"SELFTEST TRON PASS: (.+)", r.text())
+    return ok, (detail.group(1) if ok and detail else "раунд не закончился (код %s)" % code)
+
+
+@check("walk")
+def check_walk(r):
+    """Отошёл и вернулся: вход не залипает и снова достаёт до стен."""
+    mock, port = r.start_mock(["--still", "--walk", "--step", "17", "--step-x", "60",
+                               "--jump-every", "9999", "--duration", "40"])
+    try:
+        r.run_game(["--port=" + port, "--selftest=walk"], timeout=40)
+    finally:
+        r.stop(mock)
+    m = re.search(r"ST walk: пока далеко, \|a\| = ([\d.]+)", r.text())
+    ok = "SELFTEST WALK PASS" in r.text()
+    return ok, ("пока далеко |a|=%s, после возврата полный ход" % m.group(1)
+                if ok and m else "вход залипает или нейтраль не пересчиталась")
+
+
 @check("lag")
 def check_lag(r):
     """Задержка управления: после скачка носа ракетка проходит 90% пути ≤ 120 мс."""
