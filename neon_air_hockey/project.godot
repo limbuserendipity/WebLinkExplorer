@@ -1,8 +1,8 @@
 config_version=5
 
 [application]
-config/name="Neon Air Hockey"
-run/main_scene="res://game/Main.tscn"
+config/name="Neon Arcade"
+run/main_scene="res://ui/Menu.tscn"
 config/features=PackedStringArray("4.5", "GL Compatibility")
 
 [autoload]
