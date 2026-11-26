@@ -28,6 +28,12 @@ const CARDS := [
 	{"id": "jump", "title": "НЕОН-ДЖАМП", "who": "1–4 игрока", "min": 1, "max": 4,
 		"scene": "res://game/Jump.tscn",
 		"hint": "прыгай выше всех"},
+	{"id": "tetris", "title": "НЕОН-ТЕТРИС", "who": "1–4 игрока", "min": 1, "max": 4,
+		"scene": "res://game/Tetris.tscn",
+		"hint": "стакан на каждого · жест — сброс"},
+	{"id": "saber", "title": "СВЕТОВЫЕ МЕЧИ", "who": "ровно 2 игрока", "min": 2, "max": 2,
+		"scene": "res://game/Saber.tscn",
+		"hint": "стойка — защита · жест — укол"},
 ]
 const CHIPS_PER_ROW := 4                 # сколько фишек влезает в ряд
 
@@ -131,7 +137,11 @@ func _load_game(id: String) -> void:
 
 
 func _card_rect(i: int) -> Rect2:
-	return Rect2(Lay.MENU_CARD.position + Vector2(Lay.MENU_CARD_STEP * float(i), 0.0),
+	# 6 плиток: 3 в ряд, 2 ряда.
+	var col := i % 3
+	var row := int(i / 3)
+	return Rect2(Lay.MENU_CARD.position
+		+ Vector2(Lay.MENU_CARD_STEP * float(col), Lay.MENU_ROW_STEP * float(row)),
 		Lay.MENU_CARD.size)
 
 
@@ -398,6 +408,10 @@ func _input(event: InputEvent) -> void:
 				idx = 2
 			KEY_4:
 				idx = 3
+			KEY_5:
+				idx = 4
+			KEY_6:
+				idx = 5
 			KEY_SPACE, KEY_ENTER:
 				if _leading() >= 0 and _available(_leading()):
 					_load_game(CARDS[_leading()].id)
@@ -423,9 +437,9 @@ func _input(event: InputEvent) -> void:
 
 func _draw() -> void:
 	Neo.grid_bg(self, Vector2(Lay.W, Lay.H))
-	var keys := "1 / 2 / 3 / 4 — выбрать · Enter — начать"
+	var keys := "1..6 — выбрать · Enter — начать"
 	if demo:
-		keys = "демо без трекинга: 1 / 2 / 3 / 4 — запустить игру"
+		keys = "демо без трекинга: 1..6 — запустить игру"
 	Lay.header(self, "NEON ARCADE", "неоновая аркада · голосование лицом",
 		"в кадре: %d" % players.size(), keys)
 	for i in CARDS.size():
@@ -455,6 +469,8 @@ func _draw_all_screens() -> void:
 		["разортрон", "res://game/Razor.tscn", 5],
 		["аэрохоккей", "res://game/Main.tscn", 6],
 		["неон-джамп", "res://game/Jump.tscn", 5],
+		["неон-тетрис", "res://game/Tetris.tscn", 5],
+		["световые мечи", "res://game/Saber.tscn", 5],
 	]
 	var bad := 0
 	for item in list:
@@ -490,14 +506,15 @@ func _draw_card(i: int) -> void:
 	var avail := _available(i)
 	var col: Color = Neo.player_color(i) if avail else Neo.with_alpha(Neo.DIM, 0.45)
 	Lay.panel(self, r, "", col)
-	_glyph(Rect2(r.position + Vector2(32.0, 36.0), Vector2(r.size.x - 64.0, 150.0)), i,
+	# Плитка горизонтальная: слева картинка, справа название и голоса.
+	_glyph(Rect2(r.position + Vector2(24.0, 51.0), Vector2(130.0, 130.0)), i,
 		col if avail else Neo.with_alpha(Neo.DIM, 0.35))
-	var cx := r.get_center().x
+	var tx := r.position.x + 174.0
 	var top := r.position.y
-	Neo.text(self, c.title, Vector2(cx, top + 236.0), Lay.T_H2,
+	Neo.text_left(self, c.title, Vector2(tx, top + 92.0), Lay.T_H2,
 		Neo.TEXT if avail else Neo.with_alpha(Neo.DIM, 0.6))
-	Neo.text(self, c.who, Vector2(cx, top + 268.0), Lay.T_SMALL, col)
-	Neo.text(self, c.hint, Vector2(cx, top + 294.0), Lay.T_SMALL,
+	Neo.text_left(self, c.who, Vector2(tx, top + 122.0), Lay.T_SMALL, col)
+	Neo.text_left(self, c.hint, Vector2(tx, top + 150.0), Lay.T_TINY,
 		Neo.with_alpha(Neo.DIM, 0.85 if avail else 0.4))
 	# кто уже голосует за эту плитку
 	var bot := r.end.y
@@ -506,7 +523,8 @@ func _draw_card(i: int) -> void:
 		var v: Dictionary = votes[id]
 		if int(v.card) != i:
 			continue
-		draw_circle(Vector2(r.position.x + 40.0 + float(n) * 22.0, bot - 64.0), 8.0, Neo.player_color(int(id)))
+		draw_circle(Vector2(tx + 6.0 + float(n) * 16.0, top + 182.0), 6.0,
+			Neo.player_color(int(id)))
 		n += 1
 	if avail:
 		var txt := "нет голосов"
@@ -514,11 +532,12 @@ func _draw_card(i: int) -> void:
 			txt = "1 голос"
 		elif n > 1:
 			txt = "%d голос%s" % [n, "а" if n < 5 else "ов"]
-		Neo.text_left(self, txt, Vector2(r.position.x + 32.0, bot - 24.0), Lay.T_SMALL,
+		Neo.text_left(self, txt, Vector2(tx, bot - 26.0), Lay.T_SMALL,
 			Neo.TEXT if n > 0 else Neo.with_alpha(Neo.DIM, 0.7))
 	else:
-		var why := "нужно ровно 2 игрока" if c.id == "air" else "нужен хотя бы 1 игрок"
-		Neo.text_left(self, why, Vector2(r.position.x + 32.0, bot - 24.0), Lay.T_SMALL,
+		var why := "нужно ровно 2 игрока" if int(c.min) == 2 and int(c.max) == 2 \
+			else "нужен хотя бы 1 игрок"
+		Neo.text_left(self, why, Vector2(tx, bot - 26.0), Lay.T_SMALL,
 			Neo.with_alpha(Neo.WARN, 0.85))
 	# клавиша запуска
 	var key := Rect2(Vector2(_key_x(r), bot - 68.0), Vector2(44.0, 44.0))
@@ -533,44 +552,67 @@ func _key_x(r: Rect2) -> float:
 
 ## Картинка игры на плитке.
 func _glyph(g: Rect2, i: int, col: Color) -> void:
+	# Рисунок плитки в относительных координатах: он же масштабируется под любой размер.
 	draw_rect(g, Color(0.02, 0.0, 0.06, 0.55))
 	draw_rect(g, Neo.with_alpha(Neo.LINE, 0.20), false, 1.0)
+	var w := g.size.x
+	var h := g.size.y
+	var sc := minf(w, h)
+	var o := g.position
 	var c := g.get_center()
 	match i:
-		0:    # аэрохоккей: стол, центральная линия, две ракетки
-			draw_line(Vector2(c.x, g.position.y + 10.0), Vector2(c.x, g.end.y - 10.0),
+		0:    # аэрохоккей: стол, круг, две ракетки
+			draw_line(Vector2(o.x + w * 0.5, o.y + h * 0.1), Vector2(o.x + w * 0.5, o.y + h * 0.9),
 				Neo.with_alpha(Neo.LINE, 0.7), 2.0)
-			draw_arc(c, 46.0, 0.0, TAU, 40, Neo.with_alpha(Neo.LINE, 0.35), 1.5, true)
-			draw_circle(Vector2(g.position.x + 72.0, c.y), 20.0, Neo.with_alpha(Neo.LEFT, 0.9))
-			draw_circle(Vector2(g.end.x - 72.0, c.y), 20.0, Neo.with_alpha(Neo.RIGHT, 0.9))
+			draw_arc(c, sc * 0.3, 0.0, TAU, 32, Neo.with_alpha(Neo.LINE, 0.35), 1.5, true)
+			draw_circle(Vector2(o.x + w * 0.2, o.y + h * 0.5), sc * 0.15, Neo.with_alpha(Neo.LEFT, 0.9))
+			draw_circle(Vector2(o.x + w * 0.8, o.y + h * 0.5), sc * 0.15, Neo.with_alpha(Neo.RIGHT, 0.9))
 		1:    # трон: два следа
 			for j in 2:
-				var y := g.position.y + 38.0 + float(j) * 40.0
-				var col2: Color = Neo.LEFT if j == 0 else Neo.RIGHT
-				draw_line(Vector2(g.position.x + 24.0, y), Vector2(g.end.x - 24.0, y), col2, 3.0)
-				draw_circle(Vector2(g.position.x + 24.0, y), 6.0, col2)
+				var y := o.y + h * (0.34 + float(j) * 0.32)
+				var c2: Color = Neo.LEFT if j == 0 else Neo.RIGHT
+				draw_line(Vector2(o.x + w * 0.16, y), Vector2(o.x + w * 0.84, y), c2, 3.0)
+				draw_circle(Vector2(o.x + w * 0.16, y), 5.0, c2)
 		2:    # разортрон: дорога и солнце
-			var hz := g.position.y + 30.0
-			draw_circle(Vector2(c.x, hz), 26.0, Neo.with_alpha(Neo.RIGHT, 0.35))
-			draw_line(Vector2(c.x - 16.0, hz), Vector2(g.position.x + 20.0, g.end.y),
+			var hz := o.y + h * 0.28
+			draw_circle(Vector2(c.x, hz), sc * 0.18, Neo.with_alpha(Neo.RIGHT, 0.35))
+			draw_line(Vector2(c.x - w * 0.08, hz), Vector2(o.x + w * 0.14, o.y + h * 0.94),
 				Neo.with_alpha(Neo.LEFT, 0.9), 2.0)
-			draw_line(Vector2(c.x + 16.0, hz), Vector2(g.end.x - 20.0, g.end.y),
+			draw_line(Vector2(c.x + w * 0.08, hz), Vector2(o.x + w * 0.86, o.y + h * 0.94),
 				Neo.with_alpha(Neo.LEFT, 0.9), 2.0)
-			draw_line(Vector2(c.x, hz), Vector2(c.x, g.end.y), Neo.with_alpha(Neo.PUCK, 0.5), 1.5)
+			draw_line(Vector2(c.x, hz), Vector2(c.x, o.y + h * 0.94), Neo.with_alpha(Neo.PUCK, 0.5), 1.5)
 		3:    # неон-джамп: платформы и человечек в прыжке
 			for j in 3:
-				var py := g.position.y + 118.0 - float(j) * 46.0
-				var px := g.position.x + 26.0 + (0.0 if j % 2 == 0 else 76.0)
-				var c2: Color = Neo.LEFT if j != 1 else Neo.OK
-				draw_line(Vector2(px, py), Vector2(px + 84.0, py), c2, 3.0)
-			var cc := Vector2(g.position.x + 150.0, g.position.y + 46.0)
-			draw_circle(cc, 16.0, Neo.with_alpha(Neo.RIGHT, 0.18))
-			draw_arc(cc, 16.0, 0.0, TAU, 24, Neo.with_alpha(Neo.RIGHT, 0.95), 2.5, true)
-			draw_circle(cc + Vector2(-4.0, -3.0), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
-			draw_circle(cc + Vector2(4.0, -3.0), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
-			for j in 3:
-				draw_circle(cc + Vector2(-18.0, 26.0 + float(j) * 16.0), 3.0,
-					Neo.with_alpha(Neo.RIGHT, 0.5 - float(j) * 0.14))
+				var py := o.y + h * 0.8 - float(j) * h * 0.28
+				var px := o.x + w * 0.1 + (0.0 if j % 2 == 0 else w * 0.3)
+				var c3: Color = Neo.LEFT if j != 1 else Neo.OK
+				draw_line(Vector2(px, py), Vector2(px + w * 0.4, py), c3, 3.0)
+			var cc := Vector2(o.x + w * 0.68, o.y + h * 0.3)
+			draw_circle(cc, sc * 0.11, Neo.with_alpha(Neo.RIGHT, 0.18))
+			draw_arc(cc, sc * 0.11, 0.0, TAU, 24, Neo.with_alpha(Neo.RIGHT, 0.95), 2.5, true)
+			draw_circle(cc + Vector2(-sc * 0.04, -sc * 0.03), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
+			draw_circle(cc + Vector2(sc * 0.04, -sc * 0.03), 2.0, Neo.with_alpha(Neo.RIGHT, 0.95))
+		4:    # неон-тетрис: стакан на четверых и падающая фигура
+			var bw := sc * 0.16
+			var bx := c.x - bw * 2.0
+			var by := o.y + h * 0.9
+			for k in 4:
+				draw_rect(Rect2(Vector2(bx + float(k) * bw, by - bw), Vector2(bw - 2.0, bw - 2.0)),
+					Neo.with_alpha(Neo.LEFT, 0.85))
+			for d in [Vector2(0.0, 3.0), Vector2(1.0, 3.0), Vector2(1.0, 4.0)]:
+				draw_rect(Rect2(Vector2(bx + d.x * bw, by - (d.y + 1.0) * bw),
+					Vector2(bw - 2.0, bw - 2.0)), Neo.with_alpha(Neo.RIGHT, 0.9))
+			draw_line(Vector2(bx - 4.0, by - bw * 5.0), Vector2(bx - 4.0, by),
+				Neo.with_alpha(Neo.LINE, 0.35), 1.5)
+			draw_line(Vector2(bx + bw * 4.0 + 4.0, by - bw * 5.0), Vector2(bx + bw * 4.0 + 4.0, by),
+				Neo.with_alpha(Neo.LINE, 0.35), 1.5)
+		5:    # световые мечи: скрещённые клинки и искра в точке удара
+			draw_line(Vector2(o.x + w * 0.16, o.y + h * 0.86), Vector2(o.x + w * 0.56, o.y + h * 0.16),
+				Neo.with_alpha(Neo.LEFT, 0.95), 4.0)
+			draw_line(Vector2(o.x + w * 0.84, o.y + h * 0.86), Vector2(o.x + w * 0.44, o.y + h * 0.16),
+				Neo.with_alpha(Neo.RIGHT, 0.95), 4.0)
+			draw_circle(c, sc * 0.14, Neo.with_alpha(Neo.PUCK, 0.25))
+			draw_arc(c, sc * 0.14, 0.0, TAU, 20, Neo.with_alpha(Neo.PUCK, 0.9), 2.0, true)
 		_:
 			Neo.text(self, "?", c, Lay.T_H1, Neo.DIM)
 

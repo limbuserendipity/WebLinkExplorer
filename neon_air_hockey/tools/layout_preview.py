@@ -2,7 +2,8 @@
 """Схема раскладки экранов аркады — картинки для проверки пропорций.
 
 Читает константы из core/Layout.gd (единственный источник координат) и рисует
-схемы меню, «Трона», «Разортрона» и аэрохоккея. Нужен, чтобы видеть сетку
+схемы меню, «Трона», «Разортрона», аэрохоккея, «Неон-джампа», «Неон-тетриса»
+и «Световых мечей». Нужен, чтобы видеть сетку
 без запуска Godot: поля, шапка, сцена, панели, кегли.
 
   python3 tools/layout_preview.py            # → tools/layout_*.png
@@ -164,45 +165,65 @@ def screen_menu():
     d = ImageDraw.Draw(img)
     grid(d)
     header(d, "NEON ARCADE", "неоновая аркада · голосование лицом", "в кадре: 2",
-           "1 / 2 / 3 / 4 — выбрать · Enter — начать")
-    cards = ["АЭРОХОККЕЙ", "ТРОН", "РАЗОРТРОН 2000", "НЕОН-ДЖАМП"]
-    whos = ["ровно 2 игрока", "1–4 игрока", "1–6 игроков", "1–4 игрока"]
-    hints = ["ракетки в своих половинах", "световой след не прощает",
-             "гонка в закат до финиша", "прыгай выше всех"]
-    for i in range(4):
-        r = (C["MENU_CARD"][0] + i * C["MENU_CARD_STEP"],) + C["MENU_CARD"][1:]
+           "1..6 — выбрать · Enter — начать")
+    cards = [("АЭРОХОККЕЙ", "ровно 2 игрока", "ракетки в своих половинах"),
+             ("ТРОН", "1–4 игрока", "световой след не прощает"),
+             ("РАЗОРТРОН 2000", "1–6 игроков", "гонка в закат до финиша"),
+             ("НЕОН-ДЖАМП", "1–4 игрока", "прыгай выше всех"),
+             ("НЕОН-ТЕТРИС", "1–4 игрока", "стакан на каждого · жест — сброс"),
+             ("СВЕТОВЫЕ МЕЧИ", "ровно 2 игрока", "стойка — защита · жест — укол")]
+    base = C["MENU_CARD"]
+    for i, (title, who, hint) in enumerate(cards):
+        r = (base[0] + (i % 3) * C["MENU_CARD_STEP"],
+             base[1] + (i // 3) * C["MENU_ROW_STEP"], base[2], base[3])
         col = ACCENTS[i]
         panel(d, r, "", col)
-        cx = r[0] + r[2] / 2
-        g = (r[0] + 32, r[1] + 36, r[2] - 64, 150)
+        g = (r[0] + 24, r[1] + 51, 130, 130)
         rect(d, g, (30, 16, 62), 1)
+        cxg, cyg = g[0] + g[2] / 2, g[1] + g[3] / 2
         if i == 0:
-            d.line([sc(g[0] + g[2] / 2), sc(g[1]), sc(g[0] + g[2] / 2), sc(g[1] + g[3])], fill=(90, 60, 170), width=2)
-            d.ellipse([sc(g[0] + 40), sc(g[1] + g[3] / 2 - 22), sc(g[0] + 84), sc(g[1] + g[3] / 2 + 22)], outline=col, width=2)
-            d.ellipse([sc(g[0] + g[2] - 84), sc(g[1] + g[3] / 2 - 22), sc(g[0] + g[2] - 40), sc(g[1] + g[3] / 2 + 22)],
+            d.line([sc(cxg), sc(g[1] + 12), sc(cxg), sc(g[1] + g[3] - 12)], fill=(90, 60, 170), width=2)
+            d.ellipse([sc(g[0] + 20), sc(cyg - 20), sc(g[0] + 60), sc(cyg + 20)], outline=col, width=2)
+            d.ellipse([sc(g[0] + g[2] - 60), sc(cyg - 20), sc(g[0] + g[2] - 20), sc(cyg + 20)],
                       outline=ACCENTS[1], width=2)
         elif i == 1:
             for j, c2 in enumerate((ACCENTS[0], ACCENTS[1])):
-                d.line([sc(g[0] + 30), sc(g[1] + 30 + j * 40), sc(g[0] + g[2] - 30), sc(g[1] + 30 + j * 40)], fill=c2, width=3)
+                d.line([sc(g[0] + 20), sc(cyg - 20 + j * 40), sc(g[0] + g[2] - 20), sc(cyg - 20 + j * 40)],
+                       fill=c2, width=3)
+        elif i == 2:
+            d.line([sc(g[0] + 18), sc(g[1] + g[3] - 6), sc(cxg - 8), sc(g[1] + 34)], fill=ACCENTS[0], width=2)
+            d.line([sc(g[0] + g[2] - 18), sc(g[1] + g[3] - 6), sc(cxg + 8), sc(g[1] + 34)], fill=ACCENTS[1], width=2)
+            d.ellipse([sc(cxg - 20), sc(g[1] + 14), sc(cxg + 20), sc(g[1] + 54)], outline=ACCENTS[3], width=2)
+        elif i == 3:
+            for j, c2 in enumerate((ACCENTS[0], ACCENTS[2], ACCENTS[0])):
+                py = g[1] + g[3] - 26 - j * 34
+                d.line([sc(g[0] + 12 + (0 if j % 2 == 0 else 44)), sc(py),
+                        sc(g[0] + 84 + (0 if j % 2 == 0 else 44)), sc(py)], fill=c2, width=3)
+            ox, oy = g[0] + g[2] - 46, g[1] + 34
+            d.ellipse([sc(ox - 13), sc(oy - 13), sc(ox + 13), sc(oy + 13)], outline=ACCENTS[1], width=2)
+        elif i == 4:
+            bw = 20
+            bx, by = cxg - bw * 2, g[1] + g[3] - 14
+            for k in range(4):
+                fill(d, (bx + k * bw, by - bw, bw - 2, bw - 2), ACCENTS[0])
+            for dx, dy in ((0, 3), (1, 3), (1, 4)):
+                fill(d, (bx + dx * bw, by - (dy + 1) * bw, bw - 2, bw - 2), ACCENTS[1])
+            d.line([sc(bx - 4), sc(by - bw * 5), sc(bx - 4), sc(by)], fill=(90, 60, 170), width=1)
+            d.line([sc(bx + bw * 4 + 4), sc(by - bw * 5), sc(bx + bw * 4 + 4), sc(by)], fill=(90, 60, 170), width=1)
         else:
-            if i == 2:
-                d.line([sc(g[0] + 20), sc(g[1] + g[3]), sc(cx), sc(g[1] + 16)], fill=ACCENTS[0], width=2)
-                d.line([sc(g[0] + g[2] - 20), sc(g[1] + g[3]), sc(cx), sc(g[1] + 16)], fill=ACCENTS[1], width=2)
-            else:
-                for j, c2 in enumerate((ACCENTS[0], ACCENTS[2], ACCENTS[0])):
-                    py = g[1] + g[3] - 24 - j * 46
-                    d.line([sc(g[0] + 12 + (0 if j % 2 == 0 else 60)), sc(py),
-                            sc(g[0] + 96 + (0 if j % 2 == 0 else 60)), sc(py)], fill=c2, width=3)
-                ox, oy = g[0] + g[2] - 70, g[1] + 40
-                d.ellipse([sc(ox - 16), sc(oy - 16), sc(ox + 16), sc(oy + 16)], outline=ACCENTS[1], width=2)
-        text(d, (cx, r[1] + 236), cards[i], C["T_H2"], TEXT, anchor="ms")
-        text(d, (cx, r[1] + 268), whos[i], C["T_SMALL"], col, anchor="ms")
-        text(d, (cx, r[1] + 294), hints[i], C["T_SMALL"], DIM, anchor="ms")
+            d.line([sc(g[0] + 20), sc(g[1] + g[3] - 18), sc(g[0] + 72), sc(g[1] + 20)], fill=ACCENTS[0], width=4)
+            d.line([sc(g[0] + g[2] - 20), sc(g[1] + g[3] - 18), sc(g[0] + g[2] - 72), sc(g[1] + 20)],
+                   fill=ACCENTS[1], width=4)
+            d.ellipse([sc(cxg - 16), sc(cyg - 16), sc(cxg + 16), sc(cyg + 16)], outline=ACCENTS[3], width=2)
+        tx = r[0] + 174
+        text(d, (tx, r[1] + 92), title, C["T_H2"], TEXT)
+        text(d, (tx, r[1] + 122), who, C["T_SMALL"], col)
+        text(d, (tx, r[1] + 150), hint, C["T_TINY"], DIM)
         bot = r[1] + r[3]
-        for j in range(i):
-            d.ellipse([sc(r[0] + 32 + j * 22), sc(bot - 72), sc(r[0] + 48 + j * 22), sc(bot - 56)], fill=ACCENTS[j])
-        text(d, (r[0] + 32, bot - 24), ("%d голос" % i) if i else "нет голосов", C["T_SMALL"], TEXT)
-        bx, by = r[0] + r[2] - 24 - 44, bot - 24 - 44
+        for j in range(min(i, 2)):
+            d.ellipse([sc(tx + j * 16), sc(r[1] + 170), sc(tx + 12 + j * 16), sc(r[1] + 182)], fill=ACCENTS[j])
+        text(d, (tx, bot - 32), ("%d голос" % i) if i else "нет голосов", C["T_SMALL"], TEXT)
+        bx, by = r[0] + r[2] - 24 - 44, bot - 68
         rect(d, (bx, by, 44, 44), col, 2)
         text(d, (bx + 22, by + 34), str(i + 1), C["T_H2"], col, anchor="ms")
     cam_panel(d, C["MENU_CAM"])
@@ -214,9 +235,123 @@ def screen_menu():
         d.ellipse([sc(px), sc(ch[1] + 12), sc(px + 32), sc(ch[1] + 44)], outline=ACCENTS[i], width=2)
         text(d, (px + 44, ch[1] + 24), "ИГРОК %d" % (i + 1), C["T_H2"], TEXT)
         text(d, (px + 44, ch[1] + 48), "не голосовал", C["T_SMALL"], DIM)
-    text(d, (C["MENU_CARD"][0] + C["MENU_CARD"][2] / 2, C["MENU_MSG_Y"]),
-         "", C["T_H2"], DIM, anchor="ma")
     footer_line(d, C["FOOT_Y"] + 34, "отклоните лицо к плитке и задержите — это ваш голос")
+    return img
+
+
+def screen_tetris():
+    img = Image.new("RGB", (int(sc(C["W"])), int(sc(C["H"]))), BG)
+    d = ImageDraw.Draw(img)
+    grid(d)
+    header(d, "НЕОН-ТЕТРИС", "четыре стакана · до 10 линий · жест — поворот, удержание — сброс",
+           "раунд 1:12", "штраф за полный стакан: −300")
+    a = C["TETRIS_AREA"]
+    fill(d, a, (4, 0, 18))
+    rect(d, a, LINE, 1)
+    bw, step, bh = 328, 344, 720
+    for i in range(4):
+        r = (a[0] + i * step, a[1], bw, bh)
+        panel(d, r, "", ACCENTS[i])
+        text(d, (r[0] + 16, r[1] + 32), "ИГРОК %d" % (i + 1), C["T_H2"], TEXT)
+        text(d, (r[0] + bw - 16, r[1] + 32), "%d" % (1240 - i * 380), C["T_H2"], ACCENTS[i], anchor="ra")
+        fx, fy = r[0] + 24, r[1] + 56
+        fill(d, (fx, fy, 280, 560), (2, 0, 12))
+        for k in range(1, 10):
+            d.line([sc(fx + k * 28), sc(fy), sc(fx + k * 28), sc(fy + 560)], fill=(36, 22, 80), width=1)
+        for k in range(1, 20):
+            d.line([sc(fx), sc(fy + k * 28), sc(fx + 280), sc(fy + k * 28)], fill=(36, 22, 80), width=1)
+        rect(d, (fx, fy, 280, 560), (90, 60, 170), 1)
+        # несколько лежащих клеток и падающая фигура
+        for row in range(18, 20):
+            for col in range(3 + i, 7 + i):
+                fill(d, (fx + col * 28 + 2, fy + row * 28 + 2, 24, 24), ACCENTS[(col + row) % 4])
+        for dx, dy in ((0, 0), (1, 0), (2, 0), (1, 1)):
+            fill(d, (fx + (3 + i + dx) * 28 + 2, fy + (6 + dy) * 28 + 2, 24, 24), ACCENTS[i])
+        text(d, (r[0] + 16, fy + 588), "линии %d" % (i + 2), C["T_SMALL"], TEXT)
+        text(d, (r[0] + 16, fy + 614), "до 10", C["T_TINY"], DIM)
+        text(d, (r[0] + bw - 16, fy + 588), "далее", C["T_TINY"], DIM, anchor="ra")
+        for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            fill(d, (r[0] + bw - 70 + dx * 18, fy + 600 + dy * 18, 16, 16), ACCENTS[i])
+    cam_panel(d, C["TETRIS_CAM"])
+    hint_panel(d, C["TETRIS_HINT"], "face")
+    st = C["TETRIS_STATUS"]
+    panel(d, st, "состояние", LINE)
+    pad = C["PAD"]
+    ty = st[1] + pad + C["T_TINY"] + 14
+    for i, (k, v) in enumerate((("ввод", "лицо"), ("данные", "42 мс"),
+                                ("линий", "4"), ("штрафов", "1"))):
+        text(d, (st[0] + pad, ty + i * 22), k, C["T_TINY"], DIM)
+        text(d, (st[0] + pad + 108, ty + i * 22), v, C["T_TINY"], TEXT)
+    footer_line(d, C["FOOT_Y"] + 36,
+                "наклон влево-вправо — сдвиг · вниз — быстрее · жест — поворот · держите жест — сброс")
+    footer_line(d, C["FOOT_Y"] + 72, "1..5 — режим ввода · ESC — меню")
+    return img
+
+
+def screen_saber():
+    img = Image.new("RGB", (int(sc(C["W"])), int(sc(C["H"]))), BG)
+    d = ImageDraw.Draw(img)
+    grid(d)
+    header(d, "СВЕТОВЫЕ МЕЧИ", "дуэль на двоих · рука вверх — блок · жест — выпад",
+           "2 : 1", "раунд 0:42 · удар −25 из 100")
+    a = C["SABER_ARENA"]
+    fill(d, a, (6, 0, 24))
+    fy = a[1] + a[3] - 120
+    cx = a[0] + a[2] / 2
+    # зал: дуги, центральная линия, разметка пола
+    for i in range(4):
+        r = 260 + i * 150
+        d.arc([sc(cx - r), sc(fy + 60 - r), sc(cx + r), sc(fy + 60 + r)], 200, 340, fill=(70, 40, 130), width=2)
+    d.line([sc(cx), sc(a[1] + 40), sc(cx), sc(fy + 8)], fill=(60, 40, 110), width=2)
+    d.line([sc(a[0] + 24), sc(fy + 8), sc(a[0] + a[2] - 24), sc(fy + 8)], fill=ACCENTS[0], width=3)
+    d.line([sc(a[0] + 24), sc(fy + 26), sc(a[0] + a[2] - 24), sc(fy + 26)], fill=(90, 60, 170), width=1)
+    for i in range(13):
+        x = a[0] + 24 + i * (a[2] - 48) / 12
+        d.line([sc(x), sc(fy + 8), sc(x), sc(fy + 22)], fill=(90, 60, 170), width=1)
+    for side in (0, 1):
+        px = cx - 190 if side == 0 else cx + 190
+        face = 1 if side == 0 else -1
+        col = ACCENTS[side]
+        # арка за бойцом
+        d.arc([sc(px - 200), sc(fy + 10 - 200), sc(px + 200), sc(fy + 10 + 200)], 180, 360, fill=col, width=3)
+        d.arc([sc(px - 150), sc(fy + 10 - 150), sc(px + 150), sc(fy + 10 + 150)], 180, 360, fill=col, width=2)
+        # полоса здоровья, имя, счёт
+        rect(d, (px - 130, fy - 432, 260, 16), (90, 60, 170), 1)
+        fill(d, (px - 129, fy - 431, 250 - side * 90, 14), col)
+        text(d, (px, fy - 452), "ИГРОК %d" % (side + 1), C["T_SMALL"], TEXT, anchor="ms")
+        text(d, (px, fy - 408), "удары %d · блоки %d" % (2 - side, side), C["T_TINY"], DIM, anchor="ms")
+        # ноги, корпус, голова
+        d.line([sc(px - 44), sc(fy), sc(px), sc(fy - 160)], fill=col, width=6)
+        d.line([sc(px + 44), sc(fy), sc(px), sc(fy - 160)], fill=col, width=6)
+        d.line([sc(px), sc(fy - 160), sc(px), sc(fy - 320)], fill=col, width=7)
+        d.line([sc(px - 16), sc(fy - 320), sc(px + 16), sc(fy - 320)], fill=col, width=5)
+        d.ellipse([sc(px - 30), sc(fy - 398), sc(px + 30), sc(fy - 338)], outline=col, width=3)
+        # рука и клинок
+        wy = fy - 320 - (70 if side == 1 else 0)
+        wx = px + face * 50
+        d.line([sc(px), sc(fy - 320), sc(wx), sc(wy)], fill=col, width=5)
+        d.line([sc(wx), sc(wy), sc(wx + face * 270), sc(wy)], fill=(240, 245, 255), width=4)
+        d.ellipse([sc(wx + face * 270 - 7), sc(wy - 7), sc(wx + face * 270 + 7), sc(wy + 7)], fill=ACCENTS[3])
+        if side == 1:
+            d.arc([sc(px - 66), sc(fy - 390), sc(px + 66), sc(fy - 258)], 200, 340, fill=ACCENTS[3], width=4)
+    # полоса оверлея
+    rect(d, (cx - 430, fy + 14, 860, 98), LINE, 1)
+    text(d, (cx, fy + 56), "БОЙ!", C["T_H1"], ACCENTS[3], anchor="ms")
+    text(d, (cx, fy + 94), "поднимите руку — это стойка · жест — выпад", C["T_SMALL"], DIM, anchor="ms")
+    rect(d, a, LINE, 2)
+    cam_panel(d, C["SABER_CAM"])
+    hint_panel(d, C["SABER_HINT"], "face")
+    st = C["SABER_STATUS"]
+    panel(d, st, "состояние", LINE)
+    pad = C["PAD"]
+    ty = st[1] + pad + C["T_TINY"] + 14
+    for i, (k, v) in enumerate((("ввод", "лицо"), ("данные", "42 мс"),
+                                ("попаданий", "3"), ("блоков", "1"))):
+        text(d, (st[0] + pad, ty + i * 22), k, C["T_TINY"], DIM)
+        text(d, (st[0] + pad + 108, ty + i * 22), v, C["T_TINY"], TEXT)
+    footer_line(d, C["FOOT_Y"] + 36,
+                "рука вверх — стойка (блок) · рука вперёд — клинок в соперника · жест — выпад")
+    footer_line(d, C["FOOT_Y"] + 72, "1..5 — режим ввода · ESC — меню")
     return img
 
 
@@ -224,7 +359,29 @@ def screen_tron():
     img = Image.new("RGB", (int(sc(C["W"])), int(sc(C["H"]))), BG)
     d = ImageDraw.Draw(img)
     grid(d)
-    header(d, "ТРОН", "раунд 1 · до 3 побед", "", "")
+    header(d, "ТРОН", "световой след не прощает · 1–4 игрока", "раунд 1:2", "до 3 побед")
+    a = C["TRON_ARENA"]
+    fill(d, a, (4, 0, 18))
+    rect(d, a, LINE, 2)
+    # клетки арены 68×36 по 20 px
+    for i in range(1, 68):
+        d.line([sc(a[0] + i * 20), sc(a[1]), sc(a[0] + i * 20), sc(a[1] + a[3])],
+               fill=(30, 18, 66), width=1)
+    for j in range(1, 36):
+        d.line([sc(a[0]), sc(a[1] + j * 20), sc(a[0] + a[2]), sc(a[1] + j * 20)],
+               fill=(30, 18, 66), width=1)
+    # следы и мотоциклы
+    trails = [((120, 120), (520, 120), (520, 400)), ((800, 520), (1160, 520)),
+              ((300, 620), (300, 300), (700, 300)), ((1000, 180), (1260, 180), (1260, 440))]
+    for i, pts in enumerate(trails):
+        col = ACCENTS[i]
+        for k in range(len(pts) - 1):
+            d.line([sc(a[0] + pts[k][0]), sc(a[1] + pts[k][1]),
+                    sc(a[0] + pts[k + 1][0]), sc(a[1] + pts[k + 1][1])], fill=col, width=4)
+        hx, hy = pts[-1]
+        d.rectangle([sc(a[0] + hx - 8), sc(a[1] + hy - 8), sc(a[0] + hx + 8), sc(a[1] + hy + 8)],
+                    outline=col, width=3)
+        text(d, (a[0] + hx, a[1] + hy - 24), "ИГРОК %d" % (i + 1), C["T_TINY"], DIM, anchor="ms")
     sr = C["TRON_SCORES"]
     for i in range(4):
         cw = (sr[2] - 3 * 20) / 4
@@ -233,27 +390,19 @@ def screen_tron():
         rect(d, (px, sr[1], cw, sr[3]), ACCENTS[i], 2)
         d.ellipse([sc(px + 16), sc(sr[1] + 28), sc(px + 34), sc(sr[1] + 46)], fill=ACCENTS[i])
         text(d, (px + 48, sr[1] + 22), "ИГРОК %d" % (i + 1), C["T_SMALL"], TEXT)
-        text(d, (px + 48, sr[1] + 44), "побед: 0", C["T_TINY"], DIM)
-    a = C["TRON_ARENA"]
-    fill(d, a, (8, 0, 26))
-    step = 20
-    x = a[0]
-    while x < a[0] + a[2]:
-        d.line([sc(x), sc(a[1]), sc(x), sc(a[1] + a[3])], fill=(40, 24, 90), width=1)
-        x += step
-    y = a[1]
-    while y < a[1] + a[3]:
-        d.line([sc(a[0]), sc(y), sc(a[0] + a[2]), sc(y)], fill=(40, 24, 90), width=1)
-        y += step
-    rect(d, a, LINE, 2)
+        text(d, (px + 48, sr[1] + 44), "побед: %d" % (i % 3), C["T_TINY"], DIM)
     cam_panel(d, C["TRON_CAM"])
-    hint_panel(d, C["TRON_HINT"], "hand")
+    hint_panel(d, C["TRON_HINT"], "face")
     st = C["TRON_STATUS"]
     panel(d, st, "состояние", LINE)
     pad = C["PAD"]
-    text(d, (st[0] + pad, st[1] + pad + C["T_TINY"] + 20), "ввод: лицо · данные 42 мс", C["T_TINY"], TEXT)
-    text(d, (st[0] + pad, st[1] + pad + C["T_TINY"] + 42), "1..5 — режим · ESC — меню", C["T_TINY"], DIM)
-    footer_line(d, C["FOOT_Y"] + 36, "отклоните лицо в сторону — мотоцикл повернёт · в след нельзя")
+    ty = st[1] + pad + C["T_TINY"] + 14
+    for i, (k, v) in enumerate((("ввод", "лицо"), ("данные", "42 мс"),
+                                ("поворотов", "18"), ("живых", "3"))):
+        text(d, (st[0] + pad, ty + i * 20), k, C["T_TINY"], DIM)
+        text(d, (st[0] + pad + 108, ty + i * 20), v, C["T_TINY"], TEXT)
+    footer_line(d, C["FOOT_Y"] + 36, "наклон — поворот · жест — ускорение · врезался — выбыл")
+    footer_line(d, C["FOOT_Y"] + 72, "1..5 — режим ввода · ESC — меню")
     return img
 
 
@@ -261,62 +410,50 @@ def screen_razor():
     img = Image.new("RGB", (int(sc(C["W"])), int(sc(C["H"]))), BG)
     d = ImageDraw.Draw(img)
     grid(d)
-    header(d, "РАЗОРТРОН 2000", "дистанция 1200 м · трафик тормозит", "до финиша 980 м", "128 км/ч")
-    bar = C["RAZOR_BAR"]
-    fill(d, bar, (40, 24, 70))
-    fill(d, (bar[0], bar[1], bar[2] * 0.35, bar[3]), ACCENTS[0])
-    for i in range(3):
-        cx = bar[0] + bar[2] * (0.35 + i * 0.12)
-        d.ellipse([sc(cx - 5), sc(bar[1] + 1), sc(cx + 5), sc(bar[1] + 9)], fill=ACCENTS[i])
+    header(d, "РАЗОРТРОН 2000", "гонка в закат · 1–6 игроков · до финиша 1200 м",
+           "1-й: 940 м", "раунд 0:48")
     road = C["RAZOR_ROAD"]
-    horizon = 470
-    vpx = 960
-    near_y = 892
-    half_near = 677
-    half_far = 40
-    d.polygon([sc(vpx - half_far), sc(horizon), sc(vpx + half_far), sc(horizon),
-               sc(vpx + half_near), sc(near_y), sc(vpx - half_near), sc(near_y)], fill=(14, 4, 30))
-    # солнце
-    d.ellipse([sc(vpx - 150), sc(horizon - 190), sc(vpx + 150), sc(horizon + 110)], outline=(255, 80, 190), width=2)
-    for i in range(6):
-        yy = horizon - 60 + i * 26
-        d.line([sc(vpx - 120), sc(yy), sc(vpx + 120), sc(yy)], fill=BG, width=3)
-    for side in (-1, 1):
-        d.line([sc(vpx + side * half_far), sc(horizon), sc(vpx + side * half_near), sc(near_y)],
-               fill=ACCENTS[0] if side > 0 else ACCENTS[1], width=2)
-    for k in range(9):
-        t = k / 8.0
-        yy = horizon + (near_y - horizon) * (t ** 2)
-        hw = half_far + (half_near - half_far) * (t ** 2)
-        d.line([sc(vpx - hw), sc(yy), sc(vpx + hw), sc(yy)], fill=(50, 30, 100), width=1)
-    # машины
-    for i in range(3):
-        t = 0.55 + i * 0.14
-        yy = horizon + (near_y - horizon) * (t ** 2)
-        hw = half_far + (half_near - half_far) * (t ** 2)
-        for lane in (-0.5, 0.0, 0.5):
-            cx = vpx + lane * hw
-            w2 = 10 + 60 * (t ** 2)
-            fill(d, (cx - w2 / 2, yy - w2 * 0.7, w2, w2 * 0.7), (16, 6, 32))
-            rect(d, (cx - w2 / 2, yy - w2 * 0.7, w2, w2 * 0.7), ACCENTS[i], 2)
+    fill(d, road, (8, 0, 24))
+    rect(d, road, LINE, 2)
+    cx = road[0] + road[2] / 2
+    hz = road[1] + 170
+    # солнце на горизонте и две кромки шоссе
+    d.ellipse([sc(cx - 90), sc(hz - 90), sc(cx + 90), sc(hz + 90)], outline=ACCENTS[1], width=3)
+    for sx in (-1, 1):
+        d.line([sc(cx + sx * 70), sc(hz), sc(cx + sx * 470), sc(road[1] + road[3])],
+               fill=ACCENTS[0], width=3)
+    for k in range(1, 8):
+        yy = hz + (road[1] + road[3] - hz) * (k / 7.0) ** 1.8
+        d.line([sc(cx), sc(yy), sc(cx), sc(yy + 8)], fill=(150, 110, 255), width=2)
+    for i in range(4):
+        px = cx - 150 + i * 100
+        py = road[1] + road[3] - 80 - i * 26
+        w2 = 54 + i * 5
+        fill(d, (px - w2 / 2, py - w2 * 0.7, w2, w2 * 0.7), (16, 6, 32))
+        rect(d, (px - w2 / 2, py - w2 * 0.7, w2, w2 * 0.7), ACCENTS[i], 2)
+        d.ellipse([sc(px - w2 / 2 + 6), sc(py - 16), sc(px - w2 / 2 + 22), sc(py)],
+                  fill=ACCENTS[i])
+        d.ellipse([sc(px + w2 / 2 - 22), sc(py - 16), sc(px + w2 / 2 - 6), sc(py)],
+                  fill=ACCENTS[i])
+        text(d, (px, py - w2 * 0.7 - 12), "%d" % (i + 1), C["T_TINY"], ACCENTS[i], anchor="ms")
     cam_panel(d, C["RAZOR_CAM"])
     board = C["RAZOR_BOARD"]
     panel(d, board, "гонка", LINE)
     pad = C["PAD"]
     top = board[1] + pad + C["T_TINY"] + 20
-    for i in range(6):
+    for i in range(3):
         ry = top + i * 46
-        if i >= 3:
-            break
         fill(d, (board[0] + 10, ry - 12, board[2] - 20, 40), (i * 3, 2, 14))
         text(d, (board[0] + 18, ry), "%d" % (i + 1), C["T_SMALL"], ACCENTS[i])
         d.ellipse([sc(board[0] + 34), sc(ry + 2), sc(board[0] + 46), sc(ry + 14)], fill=ACCENTS[i])
         text(d, (board[0] + 54, ry), "ИГРОК %d" % (i + 1), C["T_SMALL"], TEXT)
-        text(d, (board[0] + board[2] - 18, ry), "%d м" % (1200 - i * 90), C["T_TINY"], DIM, anchor="ra")
+        text(d, (board[0] + board[2] - 18, ry), "%d м" % (1200 - i * 90), C["T_TINY"], DIM,
+             anchor="ra")
     hint_panel(d, C["RAZOR_HINT"], "face")
     text(d, (C["W"] - C["M"], C["FOOT_Y"] + 30), "наклон головы — руль · вперёд — газ · назад — тормоз",
          C["T_BODY"], DIM, anchor="ra")
-    text(d, (C["W"] - C["M"], C["FOOT_Y"] + 66), "1..5 — режим ввода · ESC — меню", C["T_SMALL"], DIM, anchor="rs")
+    text(d, (C["W"] - C["M"], C["FOOT_Y"] + 66), "1..5 — режим ввода · ESC — меню", C["T_SMALL"], DIM,
+         anchor="ra")
     return img
 
 
@@ -328,7 +465,8 @@ def screen_air():
     t = C["AIR_TABLE"]
     fill(d, t, (8, 0, 26))
     rect(d, t, LINE, 2)
-    d.line([sc(t[0] + t[2] / 2), sc(t[1]), sc(t[0] + t[2] / 2), sc(t[1] + t[3])], fill=(90, 60, 170), width=2)
+    d.line([sc(t[0] + t[2] / 2), sc(t[1]), sc(t[0] + t[2] / 2), sc(t[1] + t[3])],
+           fill=(90, 60, 170), width=2)
     d.ellipse([sc(t[0] + t[2] / 2 - 90), sc(t[1] + t[3] / 2 - 90),
                sc(t[0] + t[2] / 2 + 90), sc(t[1] + t[3] / 2 + 90)], outline=(90, 60, 170), width=2)
     gh = 120
@@ -338,8 +476,8 @@ def screen_air():
         fill(d, (gx, gy, 10, gh), ACCENTS[side])
     d.ellipse([sc(t[0] + 260), sc(t[1] + t[3] / 2 - 52), sc(t[0] + 364), sc(t[1] + t[3] / 2 + 52)],
               outline=ACCENTS[0], width=3)
-    d.ellipse([sc(t[0] + t[2] - 364), sc(t[1] + t[3] / 2 - 52), sc(t[0] + t[2] - 260), sc(t[1] + t[3] / 2 + 52)],
-              outline=ACCENTS[1], width=3)
+    d.ellipse([sc(t[0] + t[2] - 364), sc(t[1] + t[3] / 2 - 52),
+               sc(t[0] + t[2] - 260), sc(t[1] + t[3] / 2 + 52)], outline=ACCENTS[1], width=3)
     cam_panel(d, C["AIR_CAM"])
     hint_panel(d, C["AIR_HINT"], "face", stacked=True)
     st = C["AIR_STATUS"]
@@ -418,7 +556,8 @@ def main():
     S = args.scale
     for name, fn in (("menu", screen_menu), ("tron", screen_tron),
                      ("razor", screen_razor), ("air", screen_air),
-                     ("jump", screen_jump)):
+                     ("jump", screen_jump), ("tetris", screen_tetris),
+                     ("saber", screen_saber)):
         path = os.path.join(HERE, "layout_%s.png" % name)
         fn().save(path)
         print("готово:", path)

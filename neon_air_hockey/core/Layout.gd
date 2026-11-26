@@ -43,8 +43,9 @@ const LABEL_COLOR := Color(0.62, 0.66, 0.92, 0.80)
 
 # ---------------------------------------------------------------- меню
 
-const MENU_CARD := Rect2(48.0, 200.0, 322.5, 440.0)     # первая из 4 плиток, шаг 346.5
-const MENU_CARD_STEP := 346.5                           # 4 плитки в блоке из 9 колонок
+const MENU_CARD := Rect2(48.0, 200.0, 438.0, 228.0)     # первая из 6 плиток
+const MENU_CARD_STEP := 462.0                           # 3 плитки в ряд (13.5 колонок)
+const MENU_ROW_STEP := 252.0                            # второй ряд ниже на 228 + 24
 const MENU_CAM := Rect2(1434.0, 200.0, 438.0, 292.0)    # панель камеры
 const MENU_HINT := Rect2(1434.0, 512.0, 438.0, 274.0)   # подсказка ввода
 const MENU_CHIPS := Rect2(48.0, 690.0, 1362.0, 96.0)    # фишки игроков
@@ -73,6 +74,20 @@ const JUMP_CAM := Rect2(1432.0, 200.0, 440.0, 293.0)
 const JUMP_HINT := Rect2(1432.0, 513.0, 440.0, 250.0)
 const JUMP_STATUS := Rect2(1432.0, 783.0, 440.0, 137.0)
 const JUMP_SCORES := Rect2(972.0, 84.0, 900.0, 76.0)    # ряд чипов в шапке
+
+# ---------------------------------------------------------------- «Неон-тетрис»
+
+const TETRIS_AREA := Rect2(48.0, 200.0, 1360.0, 720.0)  # четыре доски по 340
+const TETRIS_CAM := Rect2(1432.0, 200.0, 440.0, 293.0)
+const TETRIS_HINT := Rect2(1432.0, 513.0, 440.0, 250.0)
+const TETRIS_STATUS := Rect2(1432.0, 783.0, 440.0, 137.0)
+
+# ---------------------------------------------------------------- световые мечи
+
+const SABER_ARENA := Rect2(48.0, 200.0, 1360.0, 720.0)
+const SABER_CAM := Rect2(1432.0, 200.0, 440.0, 293.0)
+const SABER_HINT := Rect2(1432.0, 513.0, 440.0, 250.0)
+const SABER_STATUS := Rect2(1432.0, 783.0, 440.0, 137.0)
 
 # ---------------------------------------------------------------- аэрохоккей
 
@@ -187,6 +202,8 @@ static func screen_rects() -> Dictionary:
 		"меню": [MENU_CAM, MENU_HINT],
 		"трон": [TRON_ARENA, TRON_CAM, TRON_HINT, TRON_STATUS],
 		"неон-джамп": [JUMP_ARENA, JUMP_CAM, JUMP_HINT, JUMP_STATUS],
+		"неон-тетрис": [TETRIS_AREA, TETRIS_CAM, TETRIS_HINT, TETRIS_STATUS],
+		"световые мечи": [SABER_ARENA, SABER_CAM, SABER_HINT, SABER_STATUS],
 		"разортрон": [RAZOR_CAM, RAZOR_BOARD, RAZOR_HINT],
 		"аэрохоккей": [AIR_TABLE, AIR_CAM, AIR_HINT, AIR_STATUS],
 	}
@@ -211,7 +228,7 @@ static func audit() -> Array:
 				var o: Rect2 = list[j]
 				if r.intersects(o):
 					bad.append("%s: панели %d и %d пересекаются" % [key, i, j])
-	for cam in [MENU_CAM, TRON_CAM, RAZOR_CAM, AIR_CAM, JUMP_CAM]:
+	for cam in [MENU_CAM, TRON_CAM, RAZOR_CAM, AIR_CAM, JUMP_CAM, TETRIS_CAM, SABER_CAM]:
 		var f := cam_frame(cam)
 		var want := f.size.x * 9.0 / 16.0
 		if absf(f.size.y - want) > 0.6:

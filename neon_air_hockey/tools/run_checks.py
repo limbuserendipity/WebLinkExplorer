@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Автопроверки Neon Arcade (Godot AR API v2): аэрохоккей, «Трон», «Разортрон».
+"""Автопроверки Neon Arcade (Godot AR API v2).
 
-Запускает игру с эмулятором трекинга и проверяет ключевые сценарии из
+Шесть игр: аэрохоккей, «Трон», «Разортрон», «Неон-джамп», «Неон-тетрис»
+и «Световые мечи». Запускает игру с эмулятором трекинга и проверяет ключевые сценарии из
 приёмочного списка: жизненный цикл треков, паузы, жесты, три режима ввода
 и запись трассы. Нужен Godot 4.5.1 (подойдёт и редакторская сборка).
 
@@ -258,6 +259,70 @@ def check_jump(r):
     detail = re.search(r"SELFTEST JUMP PASS: (.+)", text)
     return ok, (detail.group(1) if ok and detail
                 else "возврат после падения не сработал (код %s)" % code)
+
+
+@check("tetris")
+def check_tetris(r):
+    """«Неон-тетрис»: 4 стакана в одном кадре, жест — поворот и сброс, ряды сгорают."""
+    code = r.run_game(["--selftest=tetris"], timeout=90)
+    text = r.text()
+    ok = "SELFTEST TETRIS PASS" in text
+    m = re.search(r"SELFTEST TETRIS PASS: (.+)", text)
+    return ok, (m.group(1) if ok and m else "стаканы не доиграли раунд (код %s)" % code)
+
+
+@check("tetris4")
+def check_tetris4(r):
+    """Четверо живых игроков: стакан каждому, жесты доходят до всех четырёх."""
+    mock, port = r.start_mock(["--count", "4", "--jump-every", "1.5", "--duration", "40"])
+    try:
+        game = r.start_game(["--port=" + port, "--game=tetris"])
+        for i in range(4):                        # ждём сброс в каждом из стаканов
+            r.wait_for(r"TETRIS DROP play=%d" % i, 20)
+    finally:
+        r.stop(game)
+        r.stop(mock)
+    text = r.text()
+    if "TETRIS MATCH стаканов=4 людей=4" not in text:
+        return False, "четверо в кадре, а стаканов не четыре"
+    drops = sorted(set(re.findall(r"TETRIS DROP play=(\d+)", text)))
+    if len(drops) < 4:
+        return False, "жест-сброс дошёл только до стаканов: %s" % (",".join(drops) or "ни одного")
+    return True, "жест-сброс во всех 4 стаканах, свободных мест нет"
+
+
+@check("saber")
+def check_saber(r):
+    """«Световые мечи»: жест — выпад, поднятая рука — блок, победитель определён."""
+    code = r.run_game(["--selftest=saber"], timeout=60)
+    text = r.text()
+    ok = "SELFTEST SABER PASS" in text
+    m = re.search(r"SELFTEST SABER PASS: (.+)", text)
+    return ok, (m.group(1) if ok and m else "бой не дошёл до победителя (код %s)" % code)
+
+
+@check("saber2")
+def check_saber2(r):
+    """Двое живых игроков: попадания снимают здоровье, бой заканчивается победой."""
+    mock, port = r.start_mock(["--count", "2", "--jump-every", "1.2", "--duration", "40"])
+    try:
+        game = r.start_game(["--port=" + port, "--game=saber"])
+        r.wait_for(r"SABER FINISH", 30)
+    finally:
+        r.stop(game)
+        r.stop(mock)
+    text = r.text()
+    if "SABER MATCH бойцов=2 людей=2" not in text:
+        return False, "двое в кадре, а бойцов не двое"
+    m = re.search(r"SABER HIT attacker=(\d+) dmg=(\d+) hp=(\S+)", text)
+    if not m:
+        return False, "ни одного попадания за 30 с"
+    hits = len(re.findall(r"SABER HIT attacker=", text))
+    if "SABER FINISH" not in text:
+        return False, "попаданий %d, но бой не дошёл до победителя" % hits
+    fin = re.search(r"SABER FINISH winner=(-?\d+) hp=(\S+)", text)
+    return True, "попаданий %d, здоровье %s, победитель %s" % (
+        hits, m.group(3), (fin.group(1) if fin else "?"))
 
 
 @check("walk")
@@ -619,7 +684,8 @@ def check_draw(r):
         lines = [ln.strip() for ln in text.splitlines() if "SCRIPT ERROR" in ln]
         return False, lines[0][:160]
     if "SELFTEST DRAW PASS" in text:
-        return True, "меню, трон, разортрон, аэрохоккей, неон-джамп — без ошибок"
+        return True, ("меню, трон, разортрон, аэрохоккей, неон-джамп, "
+                      "неон-тетрис, световые мечи — без ошибок")
     return False, "прогон отрисовки не доехал"
 
 
